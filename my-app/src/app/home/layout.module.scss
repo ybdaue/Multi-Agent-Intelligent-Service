@@ -1,0 +1,8 @@
+.layout {
+  display: flex;
+  height: 100dvh;
+  overflow: hidden;
+  flex-direction: column;
+  background: var(--color-bg);
+  position: relative;
+}

@@ -1,0 +1,142 @@
+.composer {
+  flex-shrink: 0;
+  padding: 0.75rem 1.5rem 1.25rem;
+}
+
+.attachmentList {
+  max-width: 760px;
+  margin: 0 auto 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.attachmentChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 240px;
+  padding: 0.375rem 0.75rem;
+  border-radius: 99px;
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  font-size: 0.75rem;
+}
+
+.attachmentName {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.removeBtn {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.625rem;
+  padding: 2px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  &:hover {
+    color: #ef4444;
+  }
+}
+
+.limitHint {
+  font-size: 0.6875rem;
+  color: var(--color-text-tertiary);
+}
+
+.inputBox {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  padding: 0.625rem 0.625rem 0.625rem 0.875rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  transition: border-color 150ms, box-shadow 150ms;
+
+  &:focus-within {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-bg);
+  }
+}
+
+.attachBtn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 150ms, color 150ms;
+
+  &:hover:not(:disabled) {
+    background: var(--color-primary);
+    color: #fff;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 160px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  padding: 0.375rem 0;
+  font-family: inherit;
+
+  &::placeholder {
+    color: var(--color-text-tertiary);
+  }
+}
+
+.sendBtn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 150ms, opacity 150ms;
+
+  &:hover:not(:disabled) {
+    background: var(--color-primary-dark);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "agents-project"
+version = "0.1.0"
+description = "AI 智能体框架，支持 MCP 工具调用"
+requires-python = ">=3.9"
+dependencies = [
+    "langchain>=0.3.0",
+    "langchain-anthropic>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langgraph>=0.4.0",
+    "python-dotenv>=1.0.0",
+    "tickflow",
+]
+
+[tool.setuptools.packages.find]
+include = ["agents*", "mcp*", "utils*"]

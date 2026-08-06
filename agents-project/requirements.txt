@@ -1,0 +1,16 @@
+--pre
+fastapi
+langchain
+langchain-anthropic
+langchain-openai
+langgraph
+pycryptodome
+pdfplumber
+python-docx
+openpyxl
+xlrd
+python-dotenv
+tickflow
+uvicorn
+chromadb 
+sentence-transformers

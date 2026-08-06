@@ -1,0 +1,403 @@
+.page {
+  flex: 1;
+  min-height: 0;
+  animation: fadeIn 0.3s ease;
+}
+
+/* ── Container (holds StockView + ChatWidget side-by-side) ── */
+
+.container {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── StockView wrapper (flex column: filter / scroll-area / pagination) ── */
+
+.stockView {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Filter Bar (sticky top) ── */
+
+.filterBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+
+  label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8125rem;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  select,
+  input {
+    padding: 0.5rem 0.75rem;
+    border: 1.5px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 0.8125rem;
+    outline: none;
+    transition: border-color 0.15s;
+
+    &::placeholder {
+      color: var(--color-text-tertiary);
+    }
+
+    &:focus {
+      border-color: var(--color-primary-light);
+    }
+  }
+
+  select {
+    min-width: 120px;
+    cursor: pointer;
+  }
+
+  input {
+    min-width: 140px;
+  }
+
+  .filterCount {
+    margin-left: auto;
+    font-size: 0.75rem;
+    color: var(--color-text-tertiary);
+  }
+}
+
+/* ── Scrollable table area ── */
+
+.scrollArea {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+
+  /* ── Beautiful scrollbar ── */
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 3px;
+
+    &:hover {
+      background: var(--color-text-tertiary);
+    }
+  }
+}
+
+/* ── Table ── */
+
+.stockTable {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.8125rem;
+
+  thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 0.75rem 0.875rem;
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-secondary);
+    border-bottom: 2px solid var(--color-border);
+    white-space: nowrap;
+    background: var(--color-surface);
+    user-select: none;
+  }
+
+  tbody tr {
+    transition: background 0.15s;
+
+    &:hover {
+      background: var(--color-primary-bg);
+    }
+  }
+
+  .clickableRow {
+    cursor: pointer;
+  }
+
+  tbody td {
+    padding: 0.75rem 0.875rem;
+    white-space: nowrap;
+    vertical-align: middle;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  tbody tr:last-child td {
+    border-bottom: none;
+  }
+}
+
+/* ── First column ── */
+
+.cellFirst {
+  padding-left: 1rem !important;
+}
+
+/* ── Column alignment helpers ── */
+
+.colRight {
+  text-align: right;
+}
+
+.colCenter {
+  text-align: center;
+}
+
+/* ── Sortable Headers ── */
+
+.sortHeader {
+  cursor: pointer;
+  transition: color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+
+  &:hover {
+    color: var(--color-primary);
+  }
+}
+
+.sortIcon {
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 0;
+  gap: 0;
+  font-size: 7px;
+  opacity: 0.25;
+  transition: opacity 0.15s;
+
+  .sortHeader:hover & {
+    opacity: 0.5;
+  }
+
+  &.active {
+    opacity: 1;
+    color: var(--color-primary);
+  }
+}
+
+/* ── Cell Styles ── */
+
+.symbol {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+.name {
+  font-weight: 500;
+}
+
+.price {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-align: right;
+}
+
+.change {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.up {
+  color: #dc2626;
+}
+
+.down {
+  color: #16a34a;
+}
+
+.volume,
+.amount {
+  text-align: right;
+  font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+}
+
+/* ── Mini Chart ── */
+
+.chartCell {
+  text-align: center;
+}
+
+.miniChart {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* ── Pagination ── */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.875rem 0;
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+
+  button {
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: 0.8125rem;
+    cursor: pointer;
+    transition: all 0.15s;
+
+    &:hover:not(:disabled) {
+      background: var(--color-primary-bg);
+      border-color: var(--color-primary-light);
+      color: var(--color-primary);
+    }
+
+    &:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+  }
+
+  span {
+    font-size: 0.8125rem;
+    color: var(--color-text-secondary);
+  }
+}
+
+/* ── Page size selector ── */
+
+.pageSizeControl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  margin-right: auto;
+  margin-left: 1rem;
+
+  select {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 0.8125rem;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.15s;
+
+    &:focus {
+      border-color: var(--color-primary-light);
+    }
+  }
+}
+
+/* ── Skeletons ── */
+
+.skeletonBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+
+  > div {
+    height: 36px;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(
+      90deg,
+      var(--color-border) 25%,
+      transparent 50%,
+      var(--color-border) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.5s ease infinite;
+  }
+}
+
+.skeletonTh {
+  height: 14px;
+  width: 60px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--color-border) 25%,
+    transparent 50%,
+    var(--color-border) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease infinite;
+}
+
+.skeletonTd {
+  height: 14px;
+  width: 50px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--color-border) 25%,
+    transparent 50%,
+    var(--color-border) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease infinite;
+}
+
+.emptyRow {
+  td {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--color-text-tertiary);
+    font-size: 0.875rem;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes shimmer {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}

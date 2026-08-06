@@ -1,0 +1,26 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local config (permissions, scheduled tasks)
+.claude/
+
+# Environment variables - never commit real values
+.env
+.env.*
+!.env.example
+
+# Python (agents-project)
+agents-project/__pycache__/
+agents-project/.venv/
+agents-project/*.pyc
+agents-project/.mypy_cache/
+agents-project/.pytest_cache/
+agents-project/*.egg-info/
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
