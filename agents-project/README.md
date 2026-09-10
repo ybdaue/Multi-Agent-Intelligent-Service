@@ -24,12 +24,14 @@ source .venv/bin/activate
 # 4. 安装依赖
 pip install -r requirements.txt
 
-# 5. 配置环境变量
-cp .env.example .env
-# 编辑 .env 文件，填入对应的 API Key（ANTHROPIC_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY）
+# 5. 配置环境变量（.env 与 .env.development 均已 gitignore，不会提交）
+#    开发：创建 .env.development，填入你自己的 API Key（ANTHROPIC_API_KEY /
+#         OPENAI_API_KEY / DEEPSEEK_API_KEY；本地服务可加 postgreSQL_URL / redis_URL）
+#    生产：创建 .env 保存线上 Key
 
-# 6. 启动 API 服务
-uvicorn api.server:app --reload --host 0.0.0.0 --port 8000
+# 6. 启动 API 服务（未指定 APP_ENV 时：存在 .env 读生产，否则读 .env.development）
+uvicorn api.server:app --reload --host 0.0.0.0 --port 8080
+# 本地开发可显式指定：APP_ENV=development uvicorn api.server:app --reload --port 8000
 ```
 
 启动后访问 http://localhost:8000 即可查看 API 文档（Swagger UI）。

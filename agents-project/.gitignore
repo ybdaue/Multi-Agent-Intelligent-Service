@@ -1,8 +1,13 @@
 .venv/
 __pycache__/
 *.pyc
+# Environment files (never commit real keys)
 .env
+.env.*
 
 # Data not for upload
 laws/
 agent_workspace/
+
+# Local ML models (offline embedding, too large for git)
+models/

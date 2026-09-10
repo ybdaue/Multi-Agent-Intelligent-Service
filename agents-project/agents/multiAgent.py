@@ -8,15 +8,15 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.graph import MessagesState
 from langgraph.prebuilt import ToolNode, InjectedState
-from utils.models import create_deepseek_model
+from agents.utils.models import MainModel
 from .legal import legal_agent
-from .boundMemory import BoundedMemorySaver
+from .utils.boundMemory import BoundedMemorySaver
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage, SystemMessage, HumanMessage
 
 
 class FileSource(TypedDict):
-    type: Literal["bytes","path"]
+    type: Literal["bytes","path","db"]
     suffix: str
     content: Union[str, bytes]
     file_id: str
@@ -316,7 +316,7 @@ def process_legal_result(state):
 # ===== Build Graph =====
 
 tools = [use_legal_agent, use_finance_agent]
-model = create_deepseek_model().bind_tools(tools)
+model = MainModel().bind_tools(tools)
 checkpointer = BoundedMemorySaver()
 tool_node = ToolNode(tools)
 

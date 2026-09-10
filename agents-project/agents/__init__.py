@@ -1,13 +1,15 @@
 from agents.finance.agent import FinanceAgent
 from .multiAgent import multiAgent
+from .legal import legal_agent
 
-__all__ = ["FinanceAgent", "multiAgent"]
+__all__ = ["FinanceAgent", "multiAgent", "legal_agent"]
 
 
 # 统一出口：名称 → 智能体（类 或 已编译的图实例）
 _AGENTS = {
     "finance": FinanceAgent,
     "multiAgent": multiAgent,
+    "legalAgent": legal_agent,
 }
 
 _instances: dict[str, object] = {}

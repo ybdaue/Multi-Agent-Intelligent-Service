@@ -9,7 +9,7 @@ from typing_extensions import TypedDict
 from agents.finance.saver import BoundedMemorySaver
 from mcp import get_tools
 from middleware import inject_current_date
-from utils.models import create_deepseek_model
+from agents.utils.models import MainModel
 
 
 class AgentState(TypedDict):
@@ -22,7 +22,7 @@ MAX_STEPS = 10
 
 class FinanceAgent:
     def __init__(self):
-        self.model = create_deepseek_model()
+        self.model = MainModel()
         self.tools = get_tools("finance")
         self.agent = self._build_agent()
 
