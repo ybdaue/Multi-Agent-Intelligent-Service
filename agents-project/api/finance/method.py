@@ -82,7 +82,13 @@ def _is_9am_clear_time() -> bool:
 
 
 def _fetch_all_stocks():
-    df = ak.stock_zh_a_spot()
+    # 东方财富优先：新浪 stock_zh_a_spot 重复调用会被临时封 IP，返回 HTML 阻断页，
+    # 导致 demjson 报 "Can not decode value starting with character '<'"。新浪仅作兜底。
+    try:
+        df = ak.stock_zh_a_spot_em()
+    except Exception as e:
+        logger.warning("东方财富行情获取失败，回退新浪: %s", e)
+        df = ak.stock_zh_a_spot()
     records = df.to_dict(orient="records")
     result = []
     for row in records:
@@ -98,10 +104,15 @@ def _fetch_all_stocks():
     _cache["data"] = result
 
 
-_fetch_all_stocks()
+try:
+    _fetch_all_stocks()
+except Exception:
+    # 启动时网络抖动不应导致模块导入失败（否则整个服务起不来），交给后台线程重试
+    logger.exception("启动时加载股票列表失败，等待后台刷新")
 
 
 def _background_updater():
+    idle_retry_at = 0.0
     while True:
         time.sleep(30)
         # 每天早上 9:00 清除分时缓存
@@ -110,7 +121,13 @@ def _background_updater():
             logger.info("分时缓存已清除 (09:00)")
 
         if not _is_trade_time():
-            continue
+            # 盘后已有一份数据就待机；但缓存为空（启动那次拉取失败）时必须继续重试，
+            # 否则非交易时段启动会一直空着：/latest 返空、/query 一直 503 到下一个交易日。
+            # 盘后降频到 5 分钟一次，避免整夜刷屏。
+            if _cache["data"] is not None or time.time() - idle_retry_at < 300:
+                continue
+            idle_retry_at = time.time()
+
         try:
             _fetch_all_stocks()
         except Exception:

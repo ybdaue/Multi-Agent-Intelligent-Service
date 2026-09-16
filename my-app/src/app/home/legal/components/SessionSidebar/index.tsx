@@ -1,34 +1,52 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useRef } from "react";
 import {
   PlusOutlined,
   MessageOutlined,
-  DeleteOutlined,
   RobotOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
-import type { ChatSession } from "../types";
+import type { SessionListItem } from "../types";
 import styles from "./index.module.scss";
 
 interface SessionSidebarProps {
-  sessions: ChatSession[];
-  activeSessionId: string | null;
+  items: SessionListItem[];
+  activeThreadId: string | null;
+  loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
+  error: string | null;
+  deletingThreadId: string | null;
   onNewSession: () => void;
-  onSelectSession: (id: string) => void;
-  onDeleteSession: (id: string) => void;
+  onSelectSession: (item: SessionListItem) => void;
+  onDeleteSession: (item: SessionListItem) => void;
+  onLoadMore: () => void;
 }
 
 export default function SessionSidebar({
-  sessions,
-  activeSessionId,
+  items,
+  activeThreadId,
+  loading,
+  loadingMore,
+  hasMore,
+  error,
+  deletingThreadId,
   onNewSession,
   onSelectSession,
   onDeleteSession,
+  onLoadMore,
 }: SessionSidebarProps) {
-  const sorted = useMemo(
-    () => [...sessions].sort((a, b) => b.updatedAt - a.updatedAt),
-    [sessions],
-  );
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // 触底（预留 24px）自动加载下一页
+  const handleScroll = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 24) {
+      onLoadMore();
+    }
+  }, [onLoadMore]);
 
   return (
     <aside className={styles.sidebar}>
@@ -43,34 +61,48 @@ export default function SessionSidebar({
         </button>
       </div>
 
-      <div className={styles.sessionList}>
+      <div ref={listRef} className={styles.sessionList} onScroll={handleScroll}>
         <div className={styles.sectionLabel}>历史会话</div>
-        {sorted.length === 0 ? (
+
+        {loading ? (
+          <div className={styles.hint}>正在加载历史会话…</div>
+        ) : error && items.length === 0 ? (
+          <div className={styles.hint}>{error}</div>
+        ) : items.length === 0 ? (
           <div className={styles.empty}>暂无历史会话</div>
         ) : (
-          sorted.map((session) => {
-            const active = session.id === activeSessionId;
-            return (
-              <div
-                key={session.id}
-                className={`${styles.sessionItem} ${active ? styles.active : ""}`}
-                onClick={() => onSelectSession(session.id)}
-              >
-                <MessageOutlined className={styles.itemIcon} />
-                <span className={styles.itemTitle}>{session.title}</span>
-                <button
-                  className={styles.deleteBtn}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteSession(session.id);
-                  }}
-                  title="删除会话"
+          <>
+            {items.map((item) => {
+              const active = item.threadId === activeThreadId;
+              return (
+                <div
+                  key={item.threadId}
+                  className={`${styles.sessionItem} ${active ? styles.active : ""}`}
+                  onClick={() => onSelectSession(item)}
                 >
-                  <DeleteOutlined />
-                </button>
-              </div>
-            );
-          })
+                  <MessageOutlined className={styles.itemIcon} />
+                  <span className={styles.itemTitle}>{item.title}</span>
+                  <button
+                    type="button"
+                    className={styles.deleteBtn}
+                    title="删除会话"
+                    aria-label="删除会话"
+                    disabled={deletingThreadId === item.threadId}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteSession(item);
+                    }}
+                  >
+                    <DeleteOutlined />
+                  </button>
+                </div>
+              );
+            })}
+            {loadingMore && <div className={styles.hint}>加载更多…</div>}
+            {!hasMore && !loadingMore && (
+              <div className={styles.hint}>没有更多会话了</div>
+            )}
+          </>
         )}
       </div>
     </aside>

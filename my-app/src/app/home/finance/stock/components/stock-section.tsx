@@ -3,7 +3,6 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { debounce } from "@/lib/utils/debounce";
-import { getStockList } from "@/app/api/finance/getStockList";
 import styles from "../page.module.scss";
 
 interface StockData {
@@ -182,13 +181,21 @@ export default function StockView() {
     setLoading(true);
     setError(null);
 
-    getStockList({
-      page,
-      pageSize,
-      keyword: keyword || undefined,
-      sortBy: sort?.key,
-      sortDir: sort?.dir,
-    })
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+    });
+    if (keyword) params.set("keyword", keyword);
+    if (sort) {
+      params.set("sortBy", sort.key);
+      params.set("sortDir", sort.dir);
+    }
+
+    fetch(`/api/finance/stockList?${params.toString()}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`请求失败 (${res.status})`);
+        return res.json();
+      })
       .then((res) => {
         if (cancelled) return;
         setStocks(res.stocks ?? []);

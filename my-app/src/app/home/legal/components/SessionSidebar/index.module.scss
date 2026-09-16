@@ -79,6 +79,13 @@
   text-align: center;
 }
 
+.hint {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  padding: 0.5rem 0.375rem 0.25rem;
+}
+
 .sessionItem {
   display: flex;
   align-items: center;
@@ -132,5 +139,11 @@
 
   &:hover {
     color: #ef4444;
+  }
+
+  &:disabled {
+    opacity: 1;
+    cursor: default;
+    color: var(--color-text-tertiary);
   }
 }

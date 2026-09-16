@@ -1,22 +1,22 @@
 from langgraph.store.base import BaseStore
 from . import State
-from agents.utils.models import CompressModel, IntentModel
+from agents.utils.models import CompressModel, IntentModel, parse_json_object
 from pydantic import BaseModel, Field
 from typing import List
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, RemoveMessage
 from langgraph.config import get_config
+from agents.utils.executor import RAG_IO_EXECUTOR, run_in_pool
+import asyncio
 import hashlib
 import json
-import os
-import time
 import uuid
 
 # 每个用户线程只保留最近多少轮完整问答，更早的折叠进 summary
 RECENT_ROUNDS = 5
 
-
+# 从长期 store 读用户画像，从 state 读已持久化的对话摘要 summary
 def load_memory(state: State, store: BaseStore):
-    """从长期 store 读用户画像，从 state 读已持久化的对话摘要 summary。"""
+    print("正在加载用户记忆")
     user_id = str(state.get("userId", 0))
     namespace = ('memory', user_id)
     existing_memory = store.get(namespace, "user_memory")
@@ -25,6 +25,7 @@ def load_memory(state: State, store: BaseStore):
         data = existing_memory.value
         profile = data.get('preference') if isinstance(data, dict) else data
         preference = profile.get('legal_preference', []) if isinstance(profile, dict) else getattr(profile, 'legal_preference', [])
+    print(f"用户记忆加载完成：{preference}")
     return {"preference": preference, "summary": state.get("summary") or ""}
 
 
@@ -115,8 +116,12 @@ _summary_prompt = """你是一个法律对话记忆压缩器。你的任务是�
 请输出合并后的历史摘要："""
 
 
-model = IntentModel(temperature=0.1).with_structured_output(OutPut)
-_summarize_model = CompressModel(temperature=0.2)
+# 两个都是内部模型：图内 attach 了 messages 流式回调时，langchain 的 invoke 会自动
+# 改走流式，把画像 JSON / 历史摘要当 token 下发到前端，必须在实例上关掉。
+# 不用 with_structured_output：DeepSeek V4 默认 thinking，thinking 模式直接拒绝 tool_choice
+# （json_schema 与 function_calling 都 400），画像 JSON 改由提示词约束 + parse_json_object 解析。
+_profile_model = IntentModel(temperature=0.1, disable_streaming=True)
+_summarize_model = CompressModel(temperature=0.2, disable_streaming=True)
 
 
 def _content_of(message) -> str:
@@ -160,7 +165,10 @@ def _rounds_text(rounds: list) -> str:
 
 
 def _file_notes(state: State) -> str:
-    """收集本轮出现的文件信息与位置（用户上传 / 智能体生成）。"""
+    """收集本轮出现的文件信息与位置（用户上传 / 智能体生成）。
+
+    output_file 会跨轮残留，只在本轮真的起草/修改了文书时才记入。
+    """
     notes = []
     file_source = state.get("file_source")
     if file_source:
@@ -170,16 +178,15 @@ def _file_notes(state: State) -> str:
             f"用户上传文件：.{suffix} 格式，file_id={fid}；"
             "位置：已解析入库（RAG 向量库 + temp_file 临时表）"
         )
-    output_file = state.get("output_file")
-    if output_file and output_file.get("content"):
-        path = str(output_file["content"])
-        name = os.path.basename(path) if isinstance(path, str) else (output_file.get("suffix") or "文件")
-        notes.append(f"智能体生成文件：{name}；位置：{path}")
+    completed = set(state.get("completed_tasks") or [])
+    output_file = state.get("output_file") if "draft_document" in completed else None
+    if output_file and output_file.get("file_id"):
+        name = output_file.get("filename") or (output_file.get("suffix") or "文件")
+        notes.append(f"智能体生成文件：{name}；位置：created_file 表 id={output_file['file_id']}")
     return "\n".join(notes)
 
-
-def _merge_summary(prev_summary: str, older_text: str, file_notes: str) -> str:
-    """把更早摘要 + 超出最近5轮的更早轮次（+ 文件记录）合并为新的对话摘要。"""
+# 把更早摘要 + 超出最近5轮的更早轮次（+ 文件记录）合并为新的对话摘要
+async def _merge_summary(prev_summary: str, older_text: str, file_notes: str) -> str:
     if not older_text.strip() and not file_notes.strip():
         return prev_summary
     input_text = (
@@ -196,9 +203,8 @@ def _merge_summary(prev_summary: str, older_text: str, file_notes: str) -> str:
         )
     )
     try:
-        response = _summarize_model.invoke(
-            [prompt, HumanMessage(content=input_text)],
-            {"disable_streaming": True},
+        response = await _summarize_model.ainvoke(
+            [prompt, HumanMessage(content=input_text)]
         )
         text = (response.content if isinstance(response.content, str) else str(response.content)).strip()
         return text or prev_summary
@@ -216,9 +222,8 @@ SESSION_AGENT = "legal_agent"
 def _stable_message_id(kind: str, content: str) -> str:
     return f"{kind}:{hashlib.sha1(content.encode('utf-8', 'ignore')).hexdigest()[:16]}"
 
-
+# 把一轮问答（一条用户提问 + 其助手回答）转成可序列化的消息记录
 def _round_messages(round_: dict) -> list:
-    """把一轮问答（一条用户提问 + 其助手回答）转成可序列化的消息记录。"""
     msgs = []
     human = round_["human"]
     hcontent = _content_of(human)
@@ -238,9 +243,8 @@ def _round_messages(round_: dict) -> list:
             })
     return msgs
 
-
+# upsert user_session 一行，并把新消息（按 messageId 去重）追加进 history
 def _persist_session(uid: str, tid: str, agent: str, messages: list) -> None:
-    """upsert user_session 一行，并把新消息（按 messageId 去重）追加进 history。"""
     if not messages:
         return
     import psycopg
@@ -289,35 +293,41 @@ def checkin(state: State):
     """请求开始即把"本轮用户提问 + 会话行"落库（图首节点）。
 
     只要请求进入图就先保存提问，后续即使文件解析失败/意图兜底/流被客户端中断
-    走到 END 而没跑完 update，会话与提问也不会丢。返回 None，不改动 state。
+    走到 END 而没跑完 update，会话与提问也不会丢。
+    同时把"本轮是否带文件"落实到 state：没带文件就清空 doc_ids，避免文本轮次
+    误引用上一轮的文件（预处理节点已跳过，这件事改由本节点负责）。
     """
     try:
+        print("正在checkin")
         messages = state.get("messages", []) or []
         human = None
         for m in reversed(messages):
             if isinstance(m, HumanMessage) and getattr(m, "id", None) and _content_of(m).strip():
                 human = m
                 break
-        if human is None:
-            return None
-        cfg = get_config().get("configurable", {})
-        uid = cfg.get("userId") if cfg.get("userId") is not None else cfg.get("user_id", "0")
-        tid = cfg.get("thread_id")
-        if tid:
-            _persist_session(
-                str(uid), tid, SESSION_AGENT,
-                [{
-                    "role": "user",
-                    "content": _content_of(human),
-                    "messageId": human.id,
-                }],
-            )
+        if human is not None:
+            cfg = get_config().get("configurable", {})
+            uid = cfg.get("userId") if cfg.get("userId") is not None else cfg.get("user_id", "0")
+            tid = cfg.get("thread_id")
+            if tid:
+                _persist_session(
+                    str(uid), tid, SESSION_AGENT,
+                    [{
+                        "role": "user",
+                        "content": _content_of(human),
+                        "messageId": human.id,
+                    }],
+                )
+        print("checkin完毕")
     except Exception as e:
         print(f"[memory] checkin 写入失败（已忽略）: {e}")
+
+    if not state.get("file_source"):
+        return {"doc_ids": []}
     return None
 
 
-def update(state: State, store: BaseStore):
+async def update(state: State, store: BaseStore):
     print("记忆更新中")
     user_id = str(state.get("userId", 0))
     namespace = ("memory", user_id)
@@ -326,6 +336,7 @@ def update(state: State, store: BaseStore):
     # ===== 0) 先把本轮问答持久化到 user_session_history，供会话列表/历史读取 =====
     # 放在最前，避免被下面的画像/压缩模型失败提前 return 连带。checkin 已存 user 提问
     # （同一 messageId），此处去重后只新增 assistant 回复。
+    # psycopg 是同步阻塞的，本节点是 async（跑在事件循环上），必须放专用池执行。
     rounds = _split_rounds(messages)
     if rounds:
         try:
@@ -333,12 +344,18 @@ def update(state: State, store: BaseStore):
             uid = cfg.get("userId") if cfg.get("userId") is not None else cfg.get("user_id", "0")
             tid = cfg.get("thread_id")
             if tid:
-                _persist_session(str(uid), tid, SESSION_AGENT, _round_messages(rounds[-1]))
+                await run_in_pool(
+                    RAG_IO_EXECUTOR,
+                    _persist_session,
+                    str(uid), tid, SESSION_AGENT, _round_messages(rounds[-1]),
+                )
         except Exception as e:
             print(f"[memory] 写入会话历史失败（已忽略）: {e}")
 
     # ===== 1) 用户画像更新（尽力而为，失败不中断收尾）=====
-    if messages:
+    # 纯闲聊/能力咨询轮次没有法律信息可学（画像提示词本身也要求原样返回），
+    # 直接跳过这次模型调用，别让无谓的 LLM 往返拖住每轮收尾。
+    if messages and state.get("primary_intent") != "chat":
         formatted_memory = state.get("preference", [])
         conversation_text = "\n".join(
             f"{'用户' if isinstance(m, HumanMessage) else 'AI'}: {m.content[:500] if isinstance(m.content, str) else str(m.content)[:500]}"
@@ -356,17 +373,21 @@ def update(state: State, store: BaseStore):
         updated_memory = None
         for attempt in range(3):
             try:
-                updated_memory = model.invoke(
-                    [formatted_system_message, user_prompt],
-                    {"disable_streaming": True},
+                resp = await _profile_model.ainvoke(
+                    [formatted_system_message, user_prompt]
                 )
+                updated_memory = OutPut.model_validate(parse_json_object(resp.content))
                 break
             except Exception:
                 if attempt < 2:
-                    time.sleep(1)
+                    await asyncio.sleep(1)
         if updated_memory is not None:
             try:
-                store.put(namespace, "user_memory", {"preference": updated_memory.model_dump()})
+                await run_in_pool(
+                    RAG_IO_EXECUTOR,
+                    store.put,
+                    namespace, "user_memory", {"preference": updated_memory.model_dump()},
+                )
             except Exception as e:
                 print(f"[memory] 用户画像写入失败（已忽略）: {e}")
 
@@ -385,11 +406,13 @@ def update(state: State, store: BaseStore):
 
     older_text = _rounds_text(older_rounds)
     file_notes = _file_notes(state)
-    new_summary = _merge_summary(state.get("summary") or "", older_text, file_notes)
+    new_summary = await _merge_summary(state.get("summary") or "", older_text, file_notes)
 
     updates = {}
     if remove:
         updates["messages"] = remove
     if new_summary != (state.get("summary") or ""):
         updates["summary"] = new_summary
+
+    print("记忆更新完成")
     return updates or None

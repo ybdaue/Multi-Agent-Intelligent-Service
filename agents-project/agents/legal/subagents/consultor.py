@@ -36,9 +36,15 @@ def _last_agent_text(result: dict) -> str:
     return "" if not messages else str(messages[-1].content)
 
 
+# disable_streaming：图内 attach messages 流式回调时 invoke 会被 langchain 自动
+# 改走流式，咨询 agent 的中间推理会作为 token 漏到前端，故在实例上关闭。
+# checkpointer=False：默认 None 时子图会继承父图的 checkpointer 与 thread_id，把
+# legal_agent 的整段对话 load 进来，连同"正在执行中、尚无 ToolMessage"的那条 tool_call
+# 一起发给模型，触发 400 insufficient tool messages。子 agent 是单次无状态计算，必须切断继承。
 _consult_agent = create_agent(
-    model=MainModel(temperature=0.3),
+    model=MainModel(temperature=0.3, disable_streaming=True),
     tools=[retrieve_law_basis],
+    checkpointer=False,
 )
 
 

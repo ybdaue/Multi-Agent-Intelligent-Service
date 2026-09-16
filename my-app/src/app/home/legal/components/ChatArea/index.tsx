@@ -13,6 +13,7 @@ import styles from "./index.module.scss";
 interface ChatAreaProps {
   messages: Message[];
   loading: boolean;
+  historyLoading?: boolean;
   streamDone: boolean;
   suggestions?: string[];
   onUseSuggestion?: (text: string) => void;
@@ -21,6 +22,7 @@ interface ChatAreaProps {
 export default function ChatArea({
   messages,
   loading,
+  historyLoading = false,
   streamDone,
   suggestions = [],
   onUseSuggestion,
@@ -37,6 +39,14 @@ export default function ChatArea({
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
   }, [messages, loading]);
+
+  if (historyLoading) {
+    return (
+      <div className={styles.chatArea}>
+        <div className={styles.historyLoading}>正在加载历史会话…</div>
+      </div>
+    );
+  }
 
   if (messages.length === 0) {
     return (
@@ -122,7 +132,7 @@ export default function ChatArea({
                 {m.fileInfo && (m.id !== lastId || streamDone) && (
                   <a
                     className={styles.downloadChip}
-                    href={`/api/legal/download?filename=${encodeURIComponent(m.fileInfo.filename)}`}
+                    href={`/api/legal/download?fileId=${encodeURIComponent(m.fileInfo.fileId)}`}
                     download={m.fileInfo.filename}
                   >
                     <DownloadOutlined />

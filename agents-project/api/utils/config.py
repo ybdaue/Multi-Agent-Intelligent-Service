@@ -24,6 +24,3 @@ else:
 env_path = next((project_root / c for c in candidates if (project_root / c).exists()), None)
 if env_path is not None:
     load_dotenv(env_path)
-
-# agent 生成文书输出根目录，下载接口按 userId 分子目录隔离
-OUTPUT_DIR = project_root / "agent_workspace" / "output"

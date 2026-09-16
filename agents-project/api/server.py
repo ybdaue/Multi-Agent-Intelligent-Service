@@ -2,14 +2,17 @@
 # 后续 import agents 及其模块级建模型（需 DEEPSEEK_API_KEY）依赖此顺序。
 from .utils import config
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from agents.utils import RAG
+from agents.utils.mcp_client import close_mcp, refresh_mcp_tools
 
 from .utils.auth import auth_middleware
+from .utils.cleanup import cleanup_loop
 from .utils.db import pg_pool
 from .utils.rateLimit import global_limit_middleware, user_limit_middleware
 
@@ -24,8 +27,22 @@ async def lifespan(app: FastAPI):
         await pg_pool.open()
     except Exception as exc:
         print(f"[server] PostgreSQL 未就绪，连接池延后打开（{exc}）")
-    yield  # 关闭时：无额外清理（Chroma 客户端自动断开）
-    await pg_pool.close()
+    try:  # 启动时：接入外部 MCP 工具（未配置 MCP_SERVERS 则空转）
+        await refresh_mcp_tools()
+    except Exception as exc:
+        print(f"[server] 外部 MCP 工具未接入（{exc}）")
+    cleanup_task = asyncio.create_task(cleanup_loop(), name="ttl-cleanup")
+    try:
+        yield
+    finally:
+        # 关闭时：先停定时清理，再断开 MCP 连接（Chroma 客户端自动断开）
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        await close_mcp()
+        await pg_pool.close()
 
 
 app = FastAPI(title="智能体 API", version="0.1.0", lifespan=lifespan)

@@ -7,7 +7,6 @@ __pycache__/
 
 # Data not for upload
 laws/
-agent_workspace/
 
 # Local ML models (offline embedding, too large for git)
 models/

@@ -135,7 +135,10 @@ def _load_uploaded_bytes(temp_file_id: str) -> bytes:
         raise RuntimeError("缺少 postgreSQL_URL，无法按 id 读取上传文件")
     with psycopg.connect(conninfo) as conn:
         with conn.cursor() as cur:
-            cur.execute('SELECT data FROM temp_file WHERE id = %s', (temp_file_id,))
+            cur.execute(
+                'SELECT data FROM temp_file WHERE id = %s AND "expiresAt" > now()',
+                (temp_file_id,),
+            )
             row = cur.fetchone()
     if row is None:
         raise ValueError("上传文件不存在或已过期，请重新上传")

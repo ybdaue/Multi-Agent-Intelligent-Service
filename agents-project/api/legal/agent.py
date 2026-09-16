@@ -34,7 +34,7 @@ async def _store_upload(
     """
     temp_file_id = uuid.uuid4().hex
     async with pg_pool.connection() as conn:
-        await conn.execute(
+        cur = await conn.execute(
             """
             INSERT INTO temp_file
                 (id, "userId", "threadId", "fileHash", "originalName", "mimeType", "sizeBytes", data)
@@ -53,14 +53,14 @@ async def _store_upload(
                 content,
             ),
         )
-        row = await conn.fetchone()
+        row = await cur.fetchone()
         if row is None:
             # 同会话已上传过相同文件，取既有行 id
-            await conn.execute(
+            cur = await conn.execute(
                 'SELECT id FROM temp_file WHERE "userId" = %s AND "threadId" = %s AND "fileHash" = %s',
                 (str(userId), threadId, fileHash),
             )
-            row = await conn.fetchone()
+            row = await cur.fetchone()
         await conn.commit()
     return row[0]
 
@@ -131,8 +131,13 @@ async def _stream_agent(
     text: str,
     file: Optional[UploadFile],
     produce_summary: bool = False,
+    answer_nodes: Optional[set[str]] = None,
 ) -> StreamingResponse:
-    """按 agent 名称流式执行，SSE 事件与 /multiAgent 完全一致。"""
+    """按 agent 名称流式执行，SSE 事件与 /multiAgent 完全一致。
+
+    answer_nodes 非空时只放行这些节点产生的 token（用户可见的最终答复），
+    其余节点（意图识别、调度、子 Agent 内部推理等）的输出一律不下发。
+    """
     if not text.strip():
         raise HTTPException(status_code=400, detail="至少上传一段文本")
 
@@ -169,6 +174,12 @@ async def _stream_agent(
                     msg, metadata = data
                     if not isinstance(msg, AIMessageChunk):
                         continue
+                    if (
+                        answer_nodes is not None
+                        and metadata.get("langgraph_node") not in answer_nodes
+                    ):
+                        # 非最终答复节点（意图/调度/子 Agent）的 token 一律丢弃
+                        continue
                     content = msg.content
                     if isinstance(content, str) and content:
                         streamed_any_token = True
@@ -203,15 +214,12 @@ async def _stream_agent(
                     output_file = state.get("output_file")
                     if output_file and not has_file:
                         has_file = True
-                        path_str = output_file.get("content", "")
-                        filename = (
-                            os.path.basename(path_str)
-                            if isinstance(path_str, str) else ""
-                        )
-                        if filename:
+                        file_id = output_file.get("content", "")
+                        filename = output_file.get("filename", "")
+                        if file_id and filename:
                             yield (
                                 f"event: file_generated\n"
-                                f"data: {json.dumps({'userId': userId, 'filename': filename})}\n\n"
+                                f"data: {json.dumps({'fileId': file_id, 'filename': filename}, ensure_ascii=False)}\n\n"
                             )
 
             if streamed_any_token or has_file:
@@ -270,6 +278,8 @@ async def call_legal_agent(
         text=text,
         file=file,
         produce_summary=True,
+        # legal 图的用户可见输出：assistant 出纯闲聊答复，summary 出任务终稿
+        answer_nodes={"assistant", "summary"},
     )
 
 

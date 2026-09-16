@@ -5,17 +5,21 @@
 2. 基于已有文件修改/起草：从 RAG 按 file_id 读取上传文件内容（超长自动压缩）→ 重新生成
 """
 
+import io
+import json
+import os
 import re
-import shutil
+import uuid
 from datetime import datetime
 from typing import Optional
-from pathlib import Path
 from langchain.agents import create_agent
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.tools import tool
 from langgraph.config import get_config
-from agents.utils.models import MainModel, CompressModel
+from pydantic import BaseModel, Field
+from agents.utils.models import MainModel, CompressModel, parse_json_object
 from agents.utils.RAG import get_chunk, get_chunk_num
+from agents.utils.executor import PREPROCESS_EXECUTOR, RAG_IO_EXECUTOR, run_in_pool
 from ..tools.retrieve_law import retrieve_law_basis
 
 try:
@@ -27,7 +31,7 @@ except ImportError:
     Document = None
 
 
-OUTPUT_DIR = Path(__file__).resolve().parents[3] / "agent_workspace" / "output"
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 DRAFT_PROMPT = """你是一位资深法律文书起草专家。根据用户需求起草法律文书。只输出文书正文，不要输出任何解释、说明或建议。
@@ -38,16 +42,10 @@ DRAFT_PROMPT = """你是一位资深法律文书起草专家。根据用户需�
 ## 用户需求
 {requirement}
 
-## 格式要求
-请按以下结构输出（严格遵循标记格式）：
-
-TITLE: 文书标题
-
-SECTION: 一、第一条
-内容正文……
-
-SECTION: 二、第二条
-内容正文……
+## 输出格式（严格遵守）
+只输出一个 JSON 对象，禁止输出 markdown 代码块标记，禁止输出任何解释文字：
+{{"title": "文书标题", "sections": [{{"heading": "条款标题，如 一、合同标的", "body": "该条款正文"}}]}}
+其中 body 内如需多个自然段，用 \\n 分隔；全部条款按顺序放入 sections。
 
 ## 起草规则
 1. 语言严谨、规范，符合法律文书格式
@@ -72,16 +70,10 @@ REVISE_PROMPT = """你是一位资深法律文书起草专家。根据修改意�
 ## 修改意见
 {revision_instructions}
 
-## 格式要求
-请按以下结构输出完整修订后的文书（严格遵循标记格式）：
-
-TITLE: 文书标题
-
-SECTION: 一、第一条
-内容正文……
-
-SECTION: 二、第二条
-内容正文……
+## 输出格式（严格遵守）
+只输出一个 JSON 对象，禁止输出 markdown 代码块标记，禁止输出任何解释文字：
+{{"title": "文书标题", "sections": [{{"heading": "条款标题，如 一、合同标的", "body": "该条款正文"}}]}}
+其中 body 内如需多个自然段，用 \\n 分隔；输出完整修订后的文书，全部条款按顺序放入 sections。
 
 ## 修订规则
 1. 逐条处理修改意见，确保每项都得到回应
@@ -93,11 +85,33 @@ SECTION: 二、第二条
 7. 禁止输出任何解释性文字，只输出文书正文本身
 8. 文书内容必须使用中文"""
 
-_condense_model = CompressModel(temperature=0.1)
+# disable_streaming：图内 attach messages 流式回调时 invoke 会被 langchain 自动
+# 改走流式，内部模型（需求压缩、起草 agent）的输出会作为 token 漏到前端。
+_condense_model = CompressModel(temperature=0.1, disable_streaming=True)
 
+
+class DraftSection(BaseModel):
+    """文书中的一个条款/章节"""
+    heading: str = Field(description='条款标题，如"一、合同标的"，不要带 markdown 标记')
+    body: str = Field(description="该条款正文，可含多个自然段（用换行分隔）")
+
+
+class DraftDocument(BaseModel):
+    """结构化法律文书"""
+    title: str = Field(description="文书标题")
+    sections: list[DraftSection] = Field(description="文书全部条款，按顺序排列")
+
+
+# checkpointer=False：默认 None 时子图会继承父图的 checkpointer 与 thread_id，把
+# legal_agent 的整段对话 load 进来，连同"正在执行中、尚无 ToolMessage"的那条 tool_call
+# 一起发给模型，触发 400 insufficient tool messages。子 agent 是单次无状态计算，必须切断继承。
+# 不用 response_format（ToolStrategy/ProviderStrategy 都会 400）：DeepSeek V4 默认 thinking，
+# thinking 模式直接拒绝 tool_choice 与 response_format=json_schema。改为提示词约束模型只输出
+# JSON，再由 _parse_structured 解析。工具循环仍保留，故 recursion_limit 需抬高。
 _draft_agent = create_agent(
-    model=MainModel(temperature=0.3),
+    model=MainModel(temperature=0.3, disable_streaming=True),
     tools=[retrieve_law_basis],
+    checkpointer=False,
 )
 
 
@@ -148,15 +162,15 @@ def _load_file_text(file_id: str) -> str:
     return "\n".join(c["content"] for c in chunks)
 
 
-def _prepare_original_content(file_id: str) -> str:
+async def _prepare_original_content(file_id: str) -> str:
     """取回上传文件文本；超长时先 LLM 压缩成要点摘要，控制注入提示词的长度。"""
-    text = _load_file_text(file_id)
+    text = await run_in_pool(RAG_IO_EXECUTOR, _load_file_text, file_id)
     if not text:
         return ""
     if len(text) <= FULL_TEXT_LIMIT:
         return text
     try:
-        resp = _condense_model.invoke([
+        resp = await _condense_model.ainvoke([
             SystemMessage(
                 content=CONDENSE_PROMPT.format(content=text[:CONDENSE_INPUT_LIMIT])
             ),
@@ -209,7 +223,7 @@ def _build_docx(title: str, sections: list[tuple[str, str]]) -> Document:
 
 
 def _parse_llm_output(text: str) -> tuple[str, list[tuple[str, str]]]:
-    """解析 LLM 输出为标题和段落列表。"""
+    """解析 LLM 输出为标题和段落列表（结构化输出失败时的兜底）。"""
     title = "法律文书"
     sections: list[tuple[str, str]] = []
     lines = text.strip().split("\n")
@@ -224,11 +238,14 @@ def _parse_llm_output(text: str) -> tuple[str, list[tuple[str, str]]]:
         line = line.strip()
         if not line:
             continue
-        if line.upper().startswith("TITLE:"):
-            title = line[6:].strip()
-        elif line.startswith("SECTION:") or line.startswith("## "):
+        # 先剥掉行首 markdown 标题前缀，避免 "## TITLE: x" 被当成章节而丢掉标题
+        norm = line[3:].strip() if line.startswith("## ") else line
+        upper = norm.upper()
+        if upper.startswith("TITLE:"):
+            title = norm[len("TITLE:"):].strip()
+        elif upper.startswith("SECTION:"):
             _flush()
-            current_heading = line.removeprefix("SECTION:").removeprefix("## ").strip()
+            current_heading = norm[len("SECTION:"):].strip()
             current_body = []
         else:
             current_body.append(line)
@@ -237,13 +254,38 @@ def _parse_llm_output(text: str) -> tuple[str, list[tuple[str, str]]]:
     return title, sections
 
 
-def draft_document(
+def _parse_structured(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """把模型输出解析为 (标题, [(条款标题, 正文)])。
+
+    首选 JSON（提示词要求只输出 JSON），失败再退回 TITLE/SECTION 文本解析。
+    """
+    try:
+        doc = DraftDocument.model_validate(parse_json_object(text))
+        if doc.sections:
+            return doc.title, [(s.heading, s.body) for s in doc.sections]
+        print("[draftor] JSON 解析成功但 sections 为空，回退文本解析")
+    except Exception as e:
+        print(f"[draftor] JSON 解析失败，回退文本解析: {e}")
+    return _parse_llm_output(text)
+
+
+def _render_docx(title: str, sections: list[tuple[str, str]]) -> tuple[str, bytes]:
+    """同步：生成 .docx 字节和文件名（python-docx 是 CPU 活，放专用池调用）。"""
+    doc = _build_docx(title, sections)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{_clean_filename(title)}_{timestamp}.docx"
+    buf = io.BytesIO()
+    doc.save(buf)
+    return filename, buf.getvalue()
+
+
+async def draft_document(
     doc_type: str,
     requirement: str,
     revision_instructions: Optional[str] = None,
     original_file_id: Optional[str] = None,
-) -> str:
-    """起草或修改法律文书，保存为 .docx 并返回路径。
+) -> tuple[str, bytes]:
+    """起草或修改法律文书，生成 .docx 字节。
 
     Args:
         doc_type: 文书类型，如：合同、律师函、起诉状、协议书、声明书
@@ -252,7 +294,7 @@ def draft_document(
         original_file_id: 用户上传文件在 RAG 中的 file_id（基于上传文件修改/起草时传入）
 
     Returns:
-        生成的 .docx 文件绝对路径
+        (文件名, .docx 文件字节)
     """
     if Document is None:
         raise ImportError("python-docx 未安装，无法生成 .docx 文件")
@@ -261,7 +303,7 @@ def draft_document(
     # 用户上传文件不落盘，只以 file_id 存在 RAG 中，因此只走 original_file_id 这条路。
     original_content = None
     if original_file_id:
-        original_content = _prepare_original_content(original_file_id)
+        original_content = await _prepare_original_content(original_file_id)
         if not original_content:
             raise ValueError("未能在 RAG 中找到该文件内容，文件可能已过期，请重新上传后再试。")
 
@@ -282,50 +324,61 @@ def draft_document(
         )
         human_content = f"请起草一份{doc_type}，需求：{requirement}"
 
-    # 法律依据由 agent 起草/修订前通过 retrieve_law 工具自行检索
-    result = _draft_agent.invoke(
+    # 法律依据由 agent 起草/修订前通过 retrieve_law 工具自行检索；最终输出为 JSON 文本。
+    result = await _draft_agent.ainvoke(
         {
             "messages": [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=human_content),
             ]
         },
-        config={"recursion_limit": 12},
+        config={"recursion_limit": 20},
     )
 
-    title, sections = _parse_llm_output(_last_agent_text(result))
-    doc = _build_docx(title, sections)
+    title, sections = _parse_structured(_last_agent_text(result))
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{_clean_filename(title)}_{timestamp}.docx"
-    filepath = OUTPUT_DIR / filename
-    doc.save(str(filepath))
-
-    return str(filepath)
+    return await run_in_pool(PREPROCESS_EXECUTOR, _render_docx, title, sections)
 
 
-class DraftorAgent:
-    """保持与 legal/__init__.py 调用的兼容。"""
+def _save_created_file(filename: str, data: bytes) -> str:
+    """把生成的文书字节写入 PG created_file，返回行 id。
 
-    @staticmethod
-    def draft(
-        doc_type: str,
-        requirement: str,
-        revision_instructions: Optional[str] = None,
-        original_file_id: Optional[str] = None,
-    ) -> str:
-        return draft_document(doc_type, requirement, revision_instructions, original_file_id)
+    userId/threadId 取自 graph 运行 config，与 temp_file / 会话表的隔离 key 一致。
+    """
+    import psycopg
+
+    config = get_config().get("configurable", {})
+    user_id = config.get("userId")
+    thread_id = config.get("thread_id") or ""
+    if user_id is None:
+        raise RuntimeError("缺少 userId，无法保存生成的文书")
+
+    conninfo = os.getenv("postgreSQL_URL")
+    if not conninfo:
+        raise RuntimeError("缺少 postgreSQL_URL，无法保存生成的文书")
+
+    file_id = uuid.uuid4().hex
+    with psycopg.connect(conninfo) as conn:
+        conn.execute(
+            """
+            INSERT INTO created_file
+                (id, "userId", "threadId", "originalName", "mimeType", "sizeBytes", data)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (file_id, str(user_id), thread_id, filename, DOCX_MIME, len(data), data),
+        )
+        conn.commit()
+    return file_id
 
 
 @tool
-def draft_document_agent(
+async def draft_document_agent(
     doc_type: str,
     requirement: str,
     revision_instructions: Optional[str] = None,
     original_file_id: Optional[str] = None,
 ) -> str:
-    """起草或修改法律文书，返回生成的 .docx 文件路径。
+    """起草或修改法律文书，生成 .docx 并入库，返回 JSON（含 file_id 与 filename）。
 
     支持两种使用方式：
     1. 初次生成：传入 doc_type + requirement，不传 original_file_id
@@ -339,17 +392,6 @@ def draft_document_agent(
         original_file_id: 用户上传文件在 RAG 中的 file_id（基于上传文件修改/起草时必填）
     """
     print("文件生成工具被调用了")
-    filepath = draft_document(doc_type, requirement, revision_instructions, original_file_id)
-
-    # 按 userId 划分存放，方便下载接口按用户定位
-    config = get_config()
-    user_id = config["configurable"].get("userId")
-    if user_id:
-        src = Path(filepath)
-        user_dir = OUTPUT_DIR / str(user_id)
-        user_dir.mkdir(parents=True, exist_ok=True)
-        dst = user_dir / src.name
-        shutil.move(str(src), str(dst))
-        return str(dst)
-
-    return filepath
+    filename, data = await draft_document(doc_type, requirement, revision_instructions, original_file_id)
+    file_id = await run_in_pool(RAG_IO_EXECUTOR, _save_created_file, filename, data)
+    return json.dumps({"file_id": file_id, "filename": filename}, ensure_ascii=False)

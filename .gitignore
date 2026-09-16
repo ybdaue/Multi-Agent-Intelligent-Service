@@ -2,13 +2,25 @@
 .DS_Store
 Thumbs.db
 
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
 # Claude Code local config (permissions, scheduled tasks)
 .claude/
+
+# Local agent / dev tooling artifacts (not part of the project)
+.agents/
+.pi/
+.playwright-cli/
 
 # Environment variables - never commit real values
 .env
 .env.*
-!.env.example
+.env*.local
 
 # Python (agents-project)
 agents-project/__pycache__/
@@ -18,9 +30,8 @@ agents-project/.mypy_cache/
 agents-project/.pytest_cache/
 agents-project/*.egg-info/
 
-# Editor
-*.swp
-*.swo
-*~
-.vscode/
-.idea/
+# Local ML models (offline embedding, too large for git)
+agents-project/models/
+
+# 数据集（agents-project/.gitignore 已覆盖，此处兜底防止根目录误提交）
+agents-project/laws/

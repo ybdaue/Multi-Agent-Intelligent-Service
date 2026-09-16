@@ -1,8 +1,6 @@
-import { NextRequest } from "next/server";
-import { headers } from "next/headers";
-import { auth } from "@/lib/auth";
+import { withAuth } from "@/lib/utils/with-auth";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
 function hashUserId(id: string): number {
   let hash = 0;
@@ -12,24 +10,20 @@ function hashUserId(id: string): number {
   return hash;
 }
 
-export async function GET(req: NextRequest) {
-  const session = await auth.api.getSession({ headers: await headers() });
-  if (!session?.user?.id) {
-    return Response.json({ error: "未登录或登录已过期，请重新登录" }, { status: 401 });
-  }
-
+export const GET = withAuth(async (auth, req) => {
   const { searchParams } = new URL(req.url);
-  const filename = searchParams.get("filename");
-  if (!filename) {
-    return Response.json({ error: "缺少文件名" }, { status: 400 });
+  const fileId = searchParams.get("fileId");
+  if (!fileId) {
+    return Response.json({ error: "缺少文件 ID" }, { status: 400 });
   }
 
-  const userId = hashUserId(session.user.id);
+  const userId = hashUserId(auth.userId);
 
   let backendRes: Response;
   try {
     backendRes = await fetch(
-      `${BACKEND_URL}/download/${userId}/${encodeURIComponent(filename)}`,
+      `${BACKEND_URL}/api/legal/method/download/${userId}/${encodeURIComponent(fileId)}`,
+      { headers: { Authorization: `Bearer ${auth.token}` } },
     );
   } catch {
     return Response.json({ error: "后端下载服务不可用" }, { status: 502 });
@@ -48,8 +42,7 @@ export async function GET(req: NextRequest) {
         backendRes.headers.get("Content-Type") ??
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "Content-Disposition":
-        backendRes.headers.get("Content-Disposition") ??
-        `attachment; filename="${encodeURIComponent(filename)}"`,
+        backendRes.headers.get("Content-Disposition") ?? "attachment",
     },
   });
-}
+});

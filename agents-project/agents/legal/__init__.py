@@ -17,6 +17,7 @@ from langchain_core.messages import (
     RemoveMessage,
 )
 from langchain_core.runnables import RunnableConfig
+import asyncio
 import inspect
 import json
 import time
@@ -81,7 +82,7 @@ def with_retry_and_fallback(primary, fallback, max_retries=2):
             except Exception as e:
                 last_error = e
                 if attempt < max_retries:
-                    time.sleep(1)
+                    await asyncio.sleep(1)
                     continue
         return fallback(state, last_error)
     return wrapper
@@ -89,24 +90,30 @@ def with_retry_and_fallback(primary, fallback, max_retries=2):
 
 legal_workflow = StateGraph(state_schema=State)
 legal_tools = [analyze_document, consultor, draft_document_agent]
-model = MainModel(temperature=0.1).bind_tools(legal_tools)
-Intent_model = IntentModel(temperature=0.1)
+# disable_streaming 必须设在模型实例上：图内带 messages 流式回调时，langchain 的
+# invoke 会检测到处理器而自动改走流式通道，把内部输出（意图 JSON、调度寒暄、
+# 子 agent 的中间推理）当 token 下发到前端。作为 config 传 {"disable_streaming": True}
+# 无效——该开关只在模型属性或 call kwargs 里生效。
+model = MainModel(temperature=0.1, disable_streaming=True).bind_tools(legal_tools)
+Intent_model = IntentModel(temperature=0.1, disable_streaming=True)
+VALID_INTENTS = {"draft", "analyze", "consult", "chat"}
 checkpointer = create_checkpoint("legal_agent")
 store = create_agent_store("legal_agent")
 
 from ..utils.parse import parse_and_chunk
 from ..utils.RAG import upsert_chunks, delete_expired_chunks, get_chunk_num, FILE_TTL_SECONDS
+from ..utils.executor import PREPROCESS_EXECUTOR, run_in_pool
 from langgraph.types import Command
 
 
 
-def preprocessing(state: State) -> dict:
-    print("正在预处理")
+def _preprocessing_sync(state: State) -> Union[dict, Command]:
     file_source = state.get("file_source")
     if not file_source:
-        # 本轮无文件：清空历史 doc_ids，不保留已有文档引用
+        # 兜底：图路由已保证无文件轮次不进本节点，这里再挡一层
         return {"doc_ids": []}
 
+    print("正在预处理文件")
     # 惰性 TTL 清扫：上传前先清掉过期切片，控制向量库总量
     try:
         delete_expired_chunks(time.time() - FILE_TTL_SECONDS)
@@ -162,6 +169,12 @@ def preprocessing(state: State) -> dict:
         "doc_ids": [chunks[0]["metadata"]["file_id"]],
         "error": None,
     }
+
+
+async def preprocessing(state: State) -> dict:
+    """解析/切片/embedding/Chroma 写入都是重同步活，放专用池，避免占满共享线程池。"""
+    return await run_in_pool(PREPROCESS_EXECUTOR, _preprocessing_sync, state)
+
 
 Intent_prompt = """你是一个法律需求解析器。
 
@@ -324,7 +337,7 @@ Intent_prompt = """你是一个法律需求解析器。
   "task_context": {}
 }
 """
-def _intent_node(state, config=None):
+async def _intent_node(state, config=None):
     user_msg = state["user_message"]
 
     # ===== 组装对话上下文：文件状态 + 对话历史 =====
@@ -354,15 +367,34 @@ def _intent_node(state, config=None):
         SystemMessage(content=system_content),
         HumanMessage(content=user_msg),
     ]
-    # disable_streaming：意图 JSON 只用于内部路由，不进客户端 SSE 流
-    response = Intent_model.invoke(messages, {"disable_streaming": True})
+    # 必须 async/await：with_retry_and_fallback 本身是 async 节点（跑在事件循环上），
+    # 同步 invoke 会把这整段 HTTP 调用内联到 loop 上，卡住所有并发请求。
+    # Intent_model 实例已设 disable_streaming=True，意图 JSON 不会作为 token 下发。
+    response = await Intent_model.ainvoke(messages)
     try:
         parsed = json.loads(response.content)
-        print("识别到用户意图",user_msg,parsed)
+        print("识别到用户意图", user_msg, parsed)
     except json.JSONDecodeError:
-        parsed = rule_based_fallback(user_msg, has_file=has_file)
+        parsed = {}
+
+    intent = parsed.get("primary_intent")
+    if intent not in VALID_INTENTS:
+        # 未能识别出有效意图：不做关键词猜测，直接结束并告知用户
+        return Command(
+            update={
+                "error": "意图识别结果为空",
+                "messages": [
+                    AIMessage(
+                        content="抱歉，我没能理解您的需求。请把想做的法律事项描述得更具体一些，"
+                        "例如让我审查合同、解释违约金，或起草一份劳动合同。"
+                    )
+                ],
+            },
+            goto=END,
+        )
+
     return {
-        "primary_intent": parsed.get("primary_intent"),
+        "primary_intent": intent,
         "pending_tasks": parsed.get("pending_tasks", []),
         "task_context": parsed.get("task_context", {}),
         "trace_id": str(uuid.uuid4()),
@@ -379,79 +411,6 @@ def _intent_fallback(state, error=None):
         },
         goto=END
     )
-# 兜底函数，防止意图识别失败
-def rule_based_fallback(msg: str, has_file: bool = False) -> dict:
-    """LLM 解析失败时的兜底规则"""
-    msg_lower = msg.lower().strip()
-
-    # --- 优先级 1：文件优先（已上传文件 + 模糊指向文件的表达） ---
-    if has_file:
-        file_ref_keywords = ["分析", "审查", "看看", "检查", "风险", "审核", "改一下", "修改", "这个", "它", "上面", "该", "此"]
-        consult_ref_keywords = ["什么是", "什么叫", "解释"]
-        if any(k in msg_lower for k in file_ref_keywords) and not any(k in msg_lower for k in consult_ref_keywords):
-            # 已有文件 + 修改/起草类表达 → 基于文件起草/修改，而非分析
-            draft_keywords = ["修改", "改一下", "起草", "生成", "重写", "变更"]
-            if any(k in msg_lower for k in draft_keywords):
-                return {
-                    "primary_intent": "draft",
-                    "pending_tasks": ["draft_document"],
-                    "task_context": {},
-                }
-            return {
-                "primary_intent": "analyze",
-                "pending_tasks": ["analyze_file"],
-                "task_context": {},
-            }
-
-    # --- 优先级 2：起草类 ---
-    draft_keywords = ["写", "起草", "生成", "拟一份", "拟个", "律师函", "合同", "协议", "起诉状", "上诉状"]
-    if any(k in msg_lower for k in draft_keywords):
-        tasks = []
-        analyze_keywords = ["分析", "审查", "看看", "检查", "风险"]
-        if any(k in msg_lower for k in analyze_keywords):
-            tasks.append("analyze_file")
-        tasks.append("draft_document")
-        return {
-            "primary_intent": "draft",
-            "pending_tasks": tasks,
-            "task_context": {},
-        }
-
-    # --- 优先级 3：分析类 ---
-    analyze_keywords = ["分析", "审查", "风险", "看", "审核", "改一下", "修改"]
-    if any(k in msg_lower for k in analyze_keywords):
-        return {
-            "primary_intent": "analyze",
-            "pending_tasks": ["analyze_file"],
-            "task_context": {},
-        }
-
-    # --- 优先级 4：纯咨询 ---
-    consult_keywords = [
-        "什么是", "什么叫", "解释", "区别", "规定", "法条", "法律",
-        "怎么办", "怎么", "如何", "违法", "犯法", "犯罪", "拖欠", "欠钱",
-        "赔偿", "赔付", "离婚", "起诉", "诉讼", "赔偿多少", "是否合法",
-    ]
-    concept = ""
-    for k in consult_keywords:
-        if k in msg_lower:
-            idx = msg_lower.index(k) + len(k)
-            concept = msg[idx:idx + 10].strip("？??。，,！!")
-            break
-
-    if concept or any(k in msg_lower for k in consult_keywords):
-        return {
-            "primary_intent": "consult",
-            "pending_tasks": ["explain_concept"],
-            "task_context": {"concept_to_explain": concept} if concept else {},
-        }
-
-    # --- 兜底：没有任何法律信号 → 当作日常对话，不要硬造咨询/起草任务 ---
-    return {
-        "primary_intent": "chat",
-        "pending_tasks": [],
-        "task_context": {},
-    }
 
 
 decision_prompt = """你是法律助手的核心调度 Agent。
@@ -473,12 +432,12 @@ decision_prompt = """你是法律助手的核心调度 Agent。
   · 已解析文件ID：{doc_id}
   · 分析结果：{analysis_status}
   · 文书草稿：{draft_status}
-  · 文书路径：{output_file_path}
+  · 文书文件名：{output_file_path}
 
 # 可调用的子 Agent 工具
 1. analyze_document —— 分析已有文件，返回风险报告
    - file_id：填入上面的"已解析文件ID"
-2. draft_document_agent —— 起草/修改法律文书，返回 .docx 路径
+2. draft_document_agent —— 起草/修改法律文书，生成 .docx 并入库（用户可直接下载）
    - 初次生成：填 doc_type + requirement，不填 original_file_id
    - 基于上传文件修改/起草：把上面"已解析文件ID"填入 original_file_id，具体修改/起草需求填
      revision_instructions（用户说"修改我上传的合同""基于这份文件生成XX"时必须传）
@@ -508,6 +467,12 @@ decision_prompt = """你是法律助手的核心调度 Agent。
 - "文件解析/已解析文件ID/分析结果/文书草稿/文书路径"等状态行只是历史产物提示，表示此前是否产生过结果，**不代表本轮任务已完成**。
 - 判断"是否已做"的唯一依据是"已完成任务"列表（仅本轮内）。
 - 用户明确要求"重新分析/再分析/再生成"时，即使状态行显示已有结果，也必须按"下一步必须完成"重新调用对应工具，不得跳过。
+
+## 无任务对话（闲聊/能力咨询）
+- 若"待办任务栈"为空，说明本轮没有法律任务（用户只是问候、感谢、确认、闲聊，或询问你的身份/能力/收费/用法）：
+  不要调用任何工具，直接结合"近期对话历史"，用自然、口语化的中文回答用户，2~4 句即可。
+- 这是正常对话，不是任务总结：不要输出"任务已完成""本轮任务已完成"之类的系统口吻，也不要输出 JSON。
+- 若询问你的能力，简要说明擅长法律文书起草与修改、上传文件的风险审查、法律概念与法条咨询，并引导用户说清需求或上传文件。
 
 # 完成判定
 - "剩余任务"为空后，不要再调用任何工具，直接输出总结结束。
@@ -548,13 +513,16 @@ def extract_tool_results(state: State) -> dict:
             updates["answer_result"] = last_msg.content if isinstance(last_msg.content, str) else str(last_msg.content)
 
         elif last_msg.name == "draft_document_agent":
-            file_path = last_msg.content
-            if isinstance(file_path, str) and file_path.strip().endswith(".docx"):
+            content = last_msg.content
+            payload = json.loads(content) if isinstance(content, str) else content
+            if isinstance(payload, dict) and payload.get("file_id"):
+                file_id = payload["file_id"]
                 updates["output_file"] = {
-                    "type": "path",
+                    "type": "db",
                     "suffix": ".docx",
-                    "content": file_path,
-                    "file_id": f"output_{uuid.uuid4().hex[:8]}",
+                    "content": file_id,
+                    "file_id": file_id,
+                    "filename": payload.get("filename", ""),
                 }
 
     except (json.JSONDecodeError, TypeError, AttributeError):
@@ -606,45 +574,17 @@ async def _astream_assistant_response(llm, messages, config):
     return AIMessage(content=full_content, id=final_id)
 
 
-_CHAT_PERSONA = """你是一位中文友好的 AI 法律助手。用户当前只是在日常对话（问候、寒暄、闲聊），或询问关于你自身的问题，本轮不需要起草文书、审查文件或检索法条。
+async def _invoke_assistant_model(llm, messages, config):
+    """非流式调用调度模型（有待办任务的轮次用）。
 
-请自然作答：
-1. 语气亲切、口语化，2~4 句即可；不要使用"已调用工具""任务已完成""风险报告"之类的系统口吻，也不要输出 JSON。
-2. 若问你是谁或能做什么：说明你主要擅长——法律文书起草与修改（合同、起诉状、律师函等）、上传文件的法律风险审查、法律概念与法条咨询；并引导用户用一句话说清需求，或上传要审查的文件。
-3. 若聊到与法律无关的日常话题，按通识友好回应即可，不必硬扯法律。
-4. 若用户其实提出了明确的法律任务（起草/审查/咨询），用一句话请他把需求说具体些，再转入对应服务。
-5. 全程中文，简洁。
-
-# 最近对话（供语气与指代参考，不要复述）
-{history}
-"""
-
-
-async def _casual_answer(state, config):
-    """无待办任务的闲聊/元对话轮次：走轻量直答，不接法律调度器、不绑定工具。"""
-    conv_lines = []
-    for m in state.get("messages", []):
-        if isinstance(m, HumanMessage):
-            conv_lines.append(f"用户：{m.content}")
-        elif isinstance(m, AIMessage) and not (hasattr(m, "tool_calls") and m.tool_calls):
-            if m.content:
-                conv_lines.append(f"助手：{m.content}")
-    history = "\n".join(conv_lines[:-1]) if len(conv_lines) > 1 else "（无历史）"
-    summary = (state.get("summary") or "").strip()
-    if summary:
-        history = f"【更早对话摘要】{summary}\n\n{history}"
-
-    chat_llm = MainModel(temperature=0.5)
-    messages = [
-        SystemMessage(content=_CHAT_PERSONA.format(history=history)),
-        HumanMessage(content=state["user_message"]),
-    ]
-    response = await _astream_assistant_response(chat_llm, messages, config)
-    return {
-        "messages": [response],
-        "step": state.get("step", 0),
-        "completed_tasks": state.get("completed_tasks", []),
-    }
+    这类轮次模型可能先吐一句寒暄再发起工具调用，而寒暄会被丢弃、不进 state；
+    若走流式，寒暄的分片已经下发到前端，就成了回复里的杂项。改非流式后，
+    用户可见的最终答复统一由 summary 节点流式输出。
+    """
+    response = await llm.ainvoke(messages, config)
+    if not getattr(response, "id", None):
+        response = response.model_copy(update={"id": str(uuid.uuid4())})
+    return response
 
 
 async def _assistant_node(state, config=None):
@@ -677,10 +617,6 @@ async def _assistant_node(state, config=None):
 
     print(f"[assistant] 已完成={completed_tasks} 剩余={remaining_tasks} 下一步={next_task} 最后工具={last_tool_name}")
 
-    # 纯聊天/无待办任务轮次：不走法律调度器与工具，直接轻量作答（闲聊更快、语气自然、不会误调工具）
-    if not pending_tasks:
-        return await _casual_answer(state, config)
-
     # 计算各产物状态文本
     file_status = "有" if (state.get("file_source") is not None or state.get("doc_ids")) else "无"
     has_analysis = tool_result_updates.get("analysis_result", state.get("analysis_result")) is not None
@@ -691,7 +627,7 @@ async def _assistant_node(state, config=None):
 
     current_output_file = tool_result_updates.get("output_file", state.get("output_file"))
     draft_status = "有" if current_output_file else "无"
-    output_file_path = current_output_file.get("content", "") if current_output_file else ""
+    output_file_path = current_output_file.get("filename", "") if current_output_file else ""
 
     task_context = state.get("task_context", {})
     task_context_str = json.dumps(task_context, ensure_ascii=False) if task_context else "无"
@@ -763,7 +699,14 @@ async def _assistant_node(state, config=None):
             **tool_result_updates,
         }
 
-    response = await _astream_assistant_response(model, messages, config)
+    # 无待办任务（闲聊/能力咨询）：不绑工具、输出即最终答复，可以流式直答。
+    # 有待办任务：改非流式，避免工具调用前的寒暄混进前端答复（见 _invoke_assistant_model）。
+    if pending_tasks:
+        response = await _invoke_assistant_model(model, messages, config)
+    else:
+        response = await _astream_assistant_response(
+            MainModel(temperature=0.5), messages, config
+        )
 
     # 强制每轮只调一个工具：并行调用会破坏任务先后依赖，只保留第一个，剩余丢弃
     if hasattr(response, "tool_calls") and len(response.tool_calls) > 1:
@@ -805,10 +748,15 @@ _summarizer_model = CompressModel(temperature=0.2)
 
 
 def _render_results_text(state: State) -> str:
-    """把本轮任务产物整理成可读文本，供 summary 节点生成最终答复。"""
-    parts = []
+    """把本轮任务产物整理成可读文本，供 summary 节点生成最终答复。
 
-    analysis = state.get("analysis_result")
+    analysis_result/answer_result/output_file 会跨轮残留在 state 里，只按本轮
+    completed_tasks 取对应产物，避免闲聊轮次把上一轮的文书/分析结论再总结一遍。
+    """
+    parts = []
+    completed = set(state.get("completed_tasks") or [])
+
+    analysis = state.get("analysis_result") if "analyze_file" in completed else None
     if analysis:
         if isinstance(analysis, dict):
             risks = analysis.get("risks") or []
@@ -827,16 +775,14 @@ def _render_results_text(state: State) -> str:
         else:
             parts.append(f"【文件风险分析结论】{analysis}")
 
-    answer = state.get("answer_result")
+    answer = state.get("answer_result") if "explain_concept" in completed else None
     if answer:
         parts.append(f"【法律咨询答复】\n{answer}")
 
-    of = state.get("output_file")
-    if isinstance(of, dict) and of.get("content"):
-        path = str(of["content"])
-        if path:
-            fname = path.replace("\\", "/").rsplit("/", 1)[-1]
-            parts.append(f"【已生成文书】{fname}（请点击下载）")
+    of = state.get("output_file") if "draft_document" in completed else None
+    if isinstance(of, dict) and of.get("file_id"):
+        fname = of.get("filename") or "已生成文书"
+        parts.append(f"【已生成文书】{fname}（请点击下载）")
 
     return "\n\n".join(parts)
 
@@ -860,23 +806,14 @@ _SUMMARY_PROMPT = """你是法律助手的最终总结。请根据下面的"用�
 
 请输出最终答复："""
 
-
+# 任务跑完后的收尾：用 CompressModel 生成一段完整最终答复
 async def _summary_node(state: State, config: RunnableConfig):
-    """任务跑完后的收尾：用 CompressModel 生成一段完整最终答复（流式）。
-
-    produce_summary 未开启（如 multiAgent 以子图方式调用本图）时不做总结，
-    返回空更新原样保留 assistant 的答复，保证既有行为不变。
-    """
+    print("正在总结回复")
     if not bool((config or {}).get("configurable", {}).get("produce_summary")):
         return {}
-    if not (
-        state.get("completed_tasks")
-        or any(
-            state.get(k) is not None
-            for k in ("analysis_result", "answer_result", "output_file")
-        )
-    ):
-        # 纯闲聊等无产物轮次：不额外调用总结模型，assistant 答复即最终答复
+    if not state.get("completed_tasks"):
+        # 本轮没有完成任何任务（闲聊/能力咨询等）：不额外调用总结模型，assistant 答复即最终答复。
+        # 不能用 analysis_result/output_file 是否为空判断——它们是跨轮残留的。
         return {}
 
     # 定位本轮终稿（最后一条无 tool_calls 的 AIMessage），生成总结后把它替换掉，
@@ -913,6 +850,8 @@ async def _summary_node(state: State, config: RunnableConfig):
     if target_id:
         updates.append(RemoveMessage(id=target_id))
     updates.append(AIMessage(content=summary_text, id=str(uuid.uuid4())))
+
+    print("回复总结结束")
     return {"messages": updates}
 
 
@@ -935,6 +874,11 @@ def use_child_agent(state: State):
     return "summary"
 
 
+def _route_after_checkin(state: State) -> str:
+    """本轮没带文件（纯文本/闲聊）就跳过文件预处理节点，别让文件节点进入文本问答的关键路径。"""
+    return "preprocessing" if state.get("file_source") else "Intent"
+
+
 legal_workflow.add_node("checkin", checkin)
 legal_workflow.add_node("preprocessing",preprocessing)
 legal_workflow.add_node("Intent",with_retry_and_fallback(_intent_node, _intent_fallback))
@@ -944,10 +888,14 @@ legal_workflow.add_node("child_agent",legal_tool_node)
 legal_workflow.add_node("summary",with_retry_and_fallback(_summary_node, _summary_fallback))
 legal_workflow.add_node("update",update)
 
-# checkin 先落库本轮提问/会话行，再进入 preprocessing；即便 preprocessing 解析失败
-# 早退到 END，提问也已保存。
+# checkin 先落库本轮提问/会话行，再决定是否进 preprocessing；即便 preprocessing 解析失败
+# 早退到 END，提问也已保存。无文件的轮次直接进 Intent，不走文件节点。
 legal_workflow.add_edge(START,"checkin")
-legal_workflow.add_edge("checkin","preprocessing")
+legal_workflow.add_conditional_edges(
+    "checkin",
+    _route_after_checkin,
+    {"preprocessing": "preprocessing", "Intent": "Intent"},
+)
 legal_workflow.add_edge("preprocessing","Intent")
 # legal_workflow.add_edge("Intent",END)
 legal_workflow.add_edge("Intent","load_memory")

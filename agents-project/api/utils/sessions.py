@@ -55,6 +55,30 @@ async def list_sessions(
     return [_session_payload(r) for r in rows], total
 
 
+async def delete_session(user_id: str, agent_name: str, thread_id: str) -> bool:
+    """删除某用户某 agent 的一个会话：user_session（级联 user_session_history）与 checkpoint 快照。
+
+    返回是否删掉了会话行（False 表示会话不存在或不属于该用户/agent）。
+    上传/生成的文件不在此处理，交由 7 天 TTL 定时清理。
+    """
+    async with pg_pool.connection() as conn:
+        cur = await conn.execute(
+            'DELETE FROM user_session '
+            'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s '
+            'RETURNING id',
+            (user_id, agent_name, thread_id),
+        )
+        deleted = await cur.fetchone() is not None
+        # checkpoint 独立于 user_session，需显式清理；带上 userId 防止线程 id 撞车误删他人数据
+        await conn.execute(
+            'DELETE FROM checkpoint '
+            'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s',
+            (user_id, agent_name, thread_id),
+        )
+        await conn.commit()
+    return deleted
+
+
 async def get_session_history(
     user_id: str, agent_name: str, thread_id: str
 ) -> dict | None:

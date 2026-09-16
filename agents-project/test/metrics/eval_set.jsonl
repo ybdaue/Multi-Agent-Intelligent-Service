@@ -1,0 +1,52 @@
+# 指标检测的种子标注集（一行一条 JSON，# 开头为注释）
+#
+# 字段说明：
+#   id                 用例标识
+#   query              用户消息
+#   has_file           该轮是否带上传文件（决定 Intent 节点看到的"文件状态"）
+#   expect_intent      期望的 primary_intent：draft / analyze / consult / chat
+#   expect_tasks       期望的 pending_tasks（顺序敏感）：analyze_file / explain_concept / draft_document
+#   expect_tools       期望的工具序列（顺序敏感）：analyze_document / consultor / draft_document_agent
+#   retrieval_keywords 检索召回用：期望命中的父块文本里应出现的关键词（可多个）
+#   note               备注，不参与计算
+#
+# ⚠️ 这是种子集，expect_* 是按 Intent_prompt / decision_prompt 的规则人工标注的期望值。
+#    模型判定与标注不一致时，需要人来复核是"模型错"还是"标注错"，不能默认模型错。
+#    retrieval_keywords 是按常识写的常见法律词汇，请按你们的真实法规库核对一遍；
+#    更严谨的做法是给 metric_retrieval.py 加 --from-corpus，从 laws 表构造精确 parent_id 标注。
+#
+# 覆盖：共 27 条 —— 闲聊 4 / 咨询 12（其中 6 条带检索标注）/ 文件分析 5 / 起草 6
+#       其中带 retrieval_keywords 的 12 条供检索召回率使用，has_file 的 7 条供上下文指代使用
+
+{"id": "chat-001", "query": "你好", "has_file": false, "expect_intent": "chat", "expect_tasks": [], "expect_tools": []}
+{"id": "chat-002", "query": "谢谢你刚才的解答，很清楚了", "has_file": false, "expect_intent": "chat", "expect_tasks": [], "expect_tools": []}
+{"id": "chat-003", "query": "你是做什么的？都能帮我处理什么法律问题？收费吗？", "has_file": false, "expect_intent": "chat", "expect_tasks": [], "expect_tools": []}
+{"id": "chat-004", "query": "今天天气不错，给我讲个笑话吧", "has_file": false, "expect_intent": "chat", "expect_tasks": [], "expect_tools": [], "note": "与法律无关的闲聊，最容易误判成 consult"}
+
+{"id": "consult-001", "query": "什么是违约金？", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["违约金"]}
+{"id": "consult-002", "query": "劳动合同到期公司不续签，需要支付经济补偿吗？", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["劳动合同"]}
+{"id": "consult-003", "query": "不可抗力在合同法里是怎么定义的？", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["不可抗力"]}
+{"id": "consult-004", "query": "个人信息保护法对企业收集用户数据有什么要求？", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["个人信息"]}
+{"id": "consult-005", "query": "离婚时彩礼需要返还吗？", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["彩礼"]}
+{"id": "consult-006", "query": "专利申请被驳回后可以通过什么途径救济？", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["专利"]}
+
+{"id": "retr-001", "query": "不得过度收集个人信息", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["个人信息"]}
+{"id": "retr-002", "query": "约定的违约金过高，可以请求法院调整吗", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["违约金"]}
+{"id": "retr-003", "query": "合同解除的法定情形有哪些", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["合同解除", "解除合同"]}
+{"id": "retr-004", "query": "侵害他人人身权益造成损害的赔偿责任怎么认定", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["人身损害", "赔偿责任"]}
+{"id": "retr-005", "query": "用人单位违法解除劳动合同应当承担什么责任", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["劳动合同"]}
+{"id": "retr-006", "query": "有限责任公司的股东转让股权有哪些限制", "has_file": false, "expect_intent": "consult", "expect_tasks": ["explain_concept"], "expect_tools": ["consultor"], "retrieval_keywords": ["股权转让", "股东"]}
+
+{"id": "analyze-001", "query": "帮我分析一下这份合同有什么法律风险", "has_file": true, "expect_intent": "analyze", "expect_tasks": ["analyze_file"], "expect_tools": ["analyze_document"]}
+{"id": "analyze-002", "query": "这份文件合法吗", "has_file": true, "expect_intent": "analyze", "expect_tasks": ["analyze_file"], "expect_tools": ["analyze_document"], "note": "依赖已上传文件的模糊表达，考察上下文指代"}
+{"id": "analyze-003", "query": "看看这份协议，重点看违约责任条款", "has_file": true, "expect_intent": "analyze", "expect_tasks": ["analyze_file"], "expect_tools": ["analyze_document"]}
+{"id": "analyze-004", "query": "审查一下我上传的这份劳动合同", "has_file": true, "expect_intent": "analyze", "expect_tasks": ["analyze_file"], "expect_tools": ["analyze_document"]}
+
+{"id": "draft-001", "query": "帮我起草一份房屋租赁合同", "has_file": false, "expect_intent": "draft", "expect_tasks": ["draft_document"], "expect_tools": ["draft_document_agent"]}
+{"id": "draft-002", "query": "帮我写一份劳动仲裁申请书", "has_file": false, "expect_intent": "draft", "expect_tasks": ["draft_document"], "expect_tools": ["draft_document_agent"]}
+{"id": "draft-003", "query": "生成一份民间借贷合同", "has_file": false, "expect_intent": "draft", "expect_tasks": ["draft_document"], "expect_tools": ["draft_document_agent"]}
+{"id": "draft-004", "query": "帮我起草一份离婚协议书", "has_file": false, "expect_intent": "draft", "expect_tasks": ["draft_document"], "expect_tools": ["draft_document_agent"]}
+{"id": "draft-005", "query": "先分析这份合同的风险，再帮我起草一份补充协议", "has_file": true, "expect_intent": "draft", "expect_tasks": ["analyze_file", "draft_document"], "expect_tools": ["analyze_document", "draft_document_agent"], "note": "同时含分析与起草时，intent 取 draft，且 analyze_file 必须排在 draft_document 前"}
+
+{"id": "mixed-001", "query": "帮我分析这份文件，告诉我什么是拆迁补偿", "has_file": true, "expect_intent": "analyze", "expect_tasks": ["analyze_file", "explain_concept"], "expect_tools": ["analyze_document", "consultor"], "note": "同时含分析与解释，无起草需求时取 analyze"}
+{"id": "mixed-002", "query": "帮我分析这份文档，告诉我什么是拆迁补偿，再帮我生成一份财产分割合同", "has_file": true, "expect_intent": "draft", "expect_tasks": ["analyze_file", "explain_concept", "draft_document"], "expect_tools": ["analyze_document", "consultor", "draft_document_agent"], "note": "Intent_prompt 自带示例，三任务全链"}

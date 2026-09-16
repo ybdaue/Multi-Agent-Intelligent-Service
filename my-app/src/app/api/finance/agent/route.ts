@@ -1,15 +1,15 @@
-import type { NextRequest } from "next/server";
 import { request, RequestError } from "@/lib/fetch";
+import { withAuth } from "@/lib/utils/with-auth";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
-export async function POST(req: NextRequest) {
+export const POST = withAuth(async (auth, req) => {
   try {
     const body = await req.json();
 
     const backendRes = await request(`${BACKEND_URL}/api/finance/agent/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
       body: JSON.stringify(body),
     });
 
@@ -34,4 +34,4 @@ export async function POST(req: NextRequest) {
         : "服务暂时不可用";
     return Response.json({ error: message }, { status: 503 });
   }
-}
+});

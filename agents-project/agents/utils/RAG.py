@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from sentence_transformers import SentenceTransformer
 
-# 用户上传切片在向量库中的存活时长（3 天），超时后由 delete_expired_chunks 清理
-FILE_TTL_SECONDS = 3 * 24 * 60 * 60
+# 用户上传切片在向量库中的存活时长（7 天，与 temp_file/created_file 的 expiresAt 一致），
+# 超时后由 delete_expired_chunks 清理
+FILE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 # 本地 embedding 模型目录（离线加载，不再联网下载）
 # 本文件在 agents/utils/ 下，向上三级才是 agents-project/

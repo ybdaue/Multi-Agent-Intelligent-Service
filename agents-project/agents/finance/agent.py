@@ -7,7 +7,7 @@ from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
 
 from agents.finance.saver import BoundedMemorySaver
-from mcp import get_tools
+from tool_registry import get_tools
 from middleware import inject_current_date
 from agents.utils.models import MainModel
 

@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
+import { auth } from "@/lib/auth"
 
 const API_AUTH_PREFIX = "/api/auth"
+
+// 无需登录即可访问的页面
+const PUBLIC_PATHS = ["/login", "/terms", "/privacy"]
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
@@ -10,15 +14,17 @@ export async function proxy(request: NextRequest) {
   }
 
   try {
-    const res = await fetch(new URL("/api/auth/get-session", request.url), {
-      headers: request.headers,
-    })
-    const session = await res.json()
+    // 直接读取 cookie 校验 session，避免每次请求多做一次内部 HTTP 往返
+    const session = await auth.api.getSession({ headers: request.headers })
 
     if (pathname === "/login") {
       if (session?.user) {
         return NextResponse.redirect(new URL("/home", request.url))
       }
+      return NextResponse.next()
+    }
+
+    if (PUBLIC_PATHS.includes(pathname)) {
       return NextResponse.next()
     }
 

@@ -1,9 +1,7 @@
-import { NextRequest } from "next/server";
-import { headers } from "next/headers";
-import { auth } from "@/lib/auth";
 import { request } from "@/lib/fetch";
+import { withAuth } from "@/lib/utils/with-auth";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
 /**
  * 将 better-auth 的 cuid 用户 ID 稳定映射为后端可用的正整数。
@@ -18,15 +16,26 @@ function hashUserId(id: string): number {
   return hash;
 }
 
-export async function POST(req: NextRequest) {
-  // 1. 用户身份校验：校验通过后才允许转发请求到后端 agent
-  const session = await auth.api.getSession({ headers: await headers() });
-  if (!session?.user?.id) {
-    return Response.json({ error: "未登录或登录已过期，请重新登录" }, { status: 401 });
+async function readBackendError(res: Response): Promise<string> {
+  try {
+    const data = await res.json();
+    const msg = data?.error ?? data?.detail ?? data?.message;
+    if (typeof msg === "string" && msg) return msg;
+    if (Array.isArray(msg)) {
+      return msg.map((m) => m?.msg ?? JSON.stringify(m)).join("; ");
+    }
+    if (msg != null) return JSON.stringify(msg);
+  } catch {
+    // 非 JSON 响应，回退到原文
   }
-  const userId = hashUserId(session.user.id);
+  const text = await res.text().catch(() => "");
+  return text.trim();
+}
 
-  // 2. 解析客户端 multipart 表单
+export const POST = withAuth(async (auth, req) => {
+  const userId = hashUserId(auth.userId);
+
+  // 解析客户端 multipart 表单
   let form: FormData;
   try {
     form = await req.formData();
@@ -37,16 +46,16 @@ export async function POST(req: NextRequest) {
   const text = String(form.get("text") ?? "").trim();
   const file = form.get("file");
 
-  if (!threadId) {
-    return Response.json({ error: "缺少会话 ID" }, { status: 400 });
-  }
   if (!text) {
     return Response.json({ error: "文本不能为空" }, { status: 400 });
   }
 
-  // 3. 构造后端表单并转发到 /multiAgent
+  // 构造后端表单并转发到 /legalAgent（直连 legal_agent 编排图）；threadId 可选，
+  // 缺失时由后端视为新会话生成 id，经 SSE session 事件回传。
   const backendForm = new FormData();
-  backendForm.append("threadId", threadId);
+  if (threadId) {
+    backendForm.append("threadId", threadId);
+  }
   backendForm.append("text", text);
   if (file instanceof File) {
     backendForm.append("file", file, file.name);
@@ -54,8 +63,9 @@ export async function POST(req: NextRequest) {
 
   let backendRes: Response;
   try {
-    backendRes = await request(`${BACKEND_URL}/multiAgent?userId=${userId}`, {
+    backendRes = await request(`${BACKEND_URL}/api/legal/agent/legalAgent?userId=${userId}`, {
       method: "POST",
+      headers: { Authorization: `Bearer ${auth.token}` },
       body: backendForm,
       timeout: 0, // 流式响应不设超时
     });
@@ -64,14 +74,14 @@ export async function POST(req: NextRequest) {
   }
 
   if (!backendRes.ok) {
-    const detail = await backendRes.text().catch(() => "");
+    const reason = await readBackendError(backendRes);
     return Response.json(
-      { error: `后端请求失败 (${backendRes.status})`, detail },
+      { error: reason || `后端请求失败 (${backendRes.status})` },
       { status: backendRes.status },
     );
   }
 
-  // 4. 将后端 SSE 流原样透传给前端
+  // 将后端 SSE 流原样透传给前端
   return new Response(backendRes.body, {
     headers: {
       "Content-Type": "text/event-stream",
@@ -79,4 +89,4 @@ export async function POST(req: NextRequest) {
       Connection: "keep-alive",
     },
   });
-}
+})

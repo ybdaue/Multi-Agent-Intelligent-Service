@@ -5,15 +5,18 @@ retrieve_law 同一格式化出口），按输入预算分批并发提交 LLM �
 去重归并后输出。
 """
 
+import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
+import re
 from typing import TypedDict
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from langgraph.graph import StateGraph, START, END
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
-from agents.utils.models import MainModel
+from agents.utils.models import MainModel, parse_json_object, parse_json_value
+from agents.utils.executor import RAG_IO_EXECUTOR, run_in_pool
 from ..tools.retrieve_law import format_law_hits, search_law_text
 
 
@@ -24,10 +27,22 @@ class BatchRiskItem(BaseModel):
     chunk_index: int = Field(description="风险所属切片编号，对应输入中的【切片x】，禁止编造")
     risk_type: str = Field(description="风险类型，仅限以下枚举值：违约责任缺陷、管辖条款不利、权利义务不对等、免责条款过宽、争议解决条款缺失、法律法规引用过时、送达条款缺失、表述模糊、期限约定不明、其他")
     risk_level: str = Field(description="风险等级：high / medium / low")
-    sentence: str = Field(description="原文中存在风险的句子或条款，尽量保留原文表述")
-    issue: str = Field(description="具体风险说明，指出问题所在")
-    suggestion: str = Field(description="修改建议")
-    legal_basis: str = Field(description="法律依据，引用具体法条原文")
+    # 描述性字段给默认值：模型偶有漏字段（实测漏过 sentence），不该因一句缺失作废整批
+    sentence: str = Field(default="", description="原文中存在风险的句子或条款，尽量保留原文表述")
+    # 模型偶尔把风险说明写成 description（提示词里叫 issue），收下即可，避免整批作废
+    issue: str = Field(validation_alias=AliasChoices("issue", "description", "detail"), description="具体风险说明，指出问题所在")
+    suggestion: str = Field(default="", description="修改建议")
+    legal_basis: str = Field(default="", description="法律依据，引用具体法条原文")
+
+    @field_validator("chunk_index", mode="before")
+    @classmethod
+    def _coerce_chunk_index(cls, v):
+        """模型偶尔写成 "【切片3】" 之类的字符串，抽数字出来；本批仍会再校验归属。"""
+        if isinstance(v, str):
+            m = re.search(r"\d+", v)
+            if m:
+                return int(m.group())
+        return v
 
 
 class BatchRiskPage(BaseModel):
@@ -62,10 +77,14 @@ BATCH_SCAN_PROMPT = """你是一位资深法律风险审查专家。下面给出
 - medium：存在一定风险，建议修改
 - low：建议完善，但不紧急
 
+## 输出格式（严格遵守，只输出一个 JSON 对象，不要输出数组）
+{{"risks": [{{"chunk_index": 0, "risk_type": "违约责任缺陷", "risk_level": "high", "sentence": "原文中存在风险的句子", "issue": "具体风险说明", "suggestion": "修改建议", "legal_basis": "法律依据原文"}}]}}
+
 ## 输出约束
-- 只输出风险点，没有风险时返回空数组
-- 每个风险点必须包含 legal_basis 和 chunk_index
-- chunk_index 只能使用【切片x】中出现的编号，禁止编造
+- 最外层必须是 {{"risks": [...]}} 对象，禁止直接输出数组
+- 每个风险点必须且只能包含上述 7 个字段，字段名严禁改动（风险说明用 issue，不要用 description）
+- 没有风险时输出 {{"risks": []}}
+- chunk_index 填【切片x】中的数字 x（整数），禁止带【切片】字样，禁止编造
 - risk_level 必须严格为 high / medium / low 之一
 - risk_type 必须使用上述枚举值
 - 禁止输出任何解释性文字
@@ -118,9 +137,13 @@ CONSOLIDATE_PROMPT = """你是一位资深法律风险审查专家。下面是�
 - summary、风险描述必须使用中文"""
 
 
-# LLM 实例（各阶段独立模型实例，温度不同）
-_scan_batch_model = MainModel(temperature=0.1).with_structured_output(BatchRiskPage)
-_consolidate_model = MainModel(temperature=0.1).with_structured_output(ConsolidatedReport)
+# LLM 实例（各阶段独立模型实例，温度不同）。
+# disable_streaming：图内 attach messages 流式回调时 invoke 会被 langchain 自动改走流式，
+# 扫描/汇总的中间 JSON 会作为 token 漏到前端，故在实例上关闭。
+# 不用 with_structured_output：DeepSeek V4 默认 thinking，thinking 模式直接拒绝 tool_choice
+# （json_schema 与 function_calling 都 400），结构化输出改走提示词约束 + parse_json_object 解析。
+_scan_batch_model = MainModel(temperature=0.1, disable_streaming=True)
+_consolidate_model = MainModel(temperature=0.1, disable_streaming=True)
 
 # 批间并发线程数：减少墙钟时间
 SCAN_WORKERS = 4
@@ -195,16 +218,21 @@ def _build_chunks_block(batch: list[tuple[dict, str]]) -> str:
     return "\n\n".join(parts)
 
 
-def _scan_batch(batch: list[tuple[dict, str]]) -> list[dict]:
+async def _scan_batch(batch: list[tuple[dict, str]], sem: asyncio.Semaphore) -> list[dict]:
     """对一批切片调用 LLM 扫描风险，返回带 chunk_index 的风险条目列表（失败返回空）。
 
     返回前校验 chunk_index 必须属于本批切片，剔除模型编造的编号。
     """
     valid_indexes = {chunk["metadata"]["chunk_index"] for chunk, _ in batch}
     try:
-        res = _scan_batch_model.invoke([
-            BATCH_SCAN_PROMPT.format(chunks_block=_build_chunks_block(batch))
-        ])
+        async with sem:
+            resp = await _scan_batch_model.ainvoke([
+                HumanMessage(content=BATCH_SCAN_PROMPT.format(chunks_block=_build_chunks_block(batch)))
+            ])
+        # 模型可能给 {"risks": [...]}，也可能直接给裸数组 [...]；两种都收
+        value = parse_json_value(resp.content)
+        items = value.get("risks") if isinstance(value, dict) else value
+        page = BatchRiskPage.model_validate({"risks": items or []})
         return [
             {
                 "chunk_index": item.chunk_index,
@@ -215,17 +243,42 @@ def _scan_batch(batch: list[tuple[dict, str]]) -> list[dict]:
                 "suggestion": item.suggestion,
                 "legal_basis": item.legal_basis,
             }
-            for item in res.risks
+            for item in page.risks
             if item.chunk_index in valid_indexes
         ]
-    except Exception:
+    except Exception as e:
+        print(f"[analyse] 批次扫描失败（跳过该批，结果会偏少）: {e}")
         return []
 
 
-def _load_node(state: AnalyseState) -> dict:
+def _prepare_page(file_id: str, page: int) -> list[list[tuple[dict, str]]] | None:
+    """同步：取回一页切片 + 批量检索法条 + 父模块展开 + 分批；空页返回 None。
+
+    放在专用池里执行（Chroma 读写 + embedding 检索都是同步阻塞的）。
+    """
+    from agents.utils.RAG import get_chunk, retrieve_chunk, expand_to_parents
+
+    chunks = get_chunk(file_id, page=page, limit=PAGE_SIZE)
+    if not chunks:
+        return None
+
+    try:
+        raw_law = retrieve_chunk(chunks)
+        # 法条命中子→父展开：给 LLM 的是整段父模块（父文本偏肥，逐块限 2 个父，避免超预算）
+        law_results = [
+            expand_to_parents(res, limit=LAW_PARENT_PER_CHUNK) if res else res
+            for res in raw_law
+        ]
+    except Exception:
+        law_results = []
+
+    return _group_into_batches(chunks, law_results)
+
+
+async def _load_node(state: AnalyseState) -> dict:
     from agents.utils.RAG import get_chunk_num
 
-    total = get_chunk_num(state["file_id"])
+    total = await run_in_pool(RAG_IO_EXECUTOR, get_chunk_num, state["file_id"])
     if total == 0:
         return {
             "total_chunks": 0,
@@ -234,9 +287,7 @@ def _load_node(state: AnalyseState) -> dict:
     return {"total_chunks": total}
 
 
-def _scan_node(state: AnalyseState) -> dict:
-    from agents.utils.RAG import get_chunk, retrieve_chunk, expand_to_parents
-
+async def _scan_node(state: AnalyseState) -> dict:
     file_id = state["file_id"]
     total = state["total_chunks"]
     raw_risks: list[dict] = []
@@ -245,25 +296,13 @@ def _scan_node(state: AnalyseState) -> dict:
     # 每页至多 PAGE_SIZE 个切片（含 embedding，随页释放，大文件不全量载入）；
     # 页内按输入预算合并成批，批间并发调用 LLM 缩短墙钟时间。
     pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
-    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
-        for page in range(1, pages + 1):
-            chunks = get_chunk(file_id, page=page, limit=PAGE_SIZE)
-            if not chunks:
-                break
-
-            try:
-                raw_law = retrieve_chunk(chunks)
-                # 法条命中子→父展开：给 LLM 的是整段父模块（父文本偏肥，逐块限 2 个父，避免超预算）
-                law_results = [
-                    expand_to_parents(res, limit=LAW_PARENT_PER_CHUNK) if res else res
-                    for res in raw_law
-                ]
-            except Exception:
-                law_results = []
-
-            batches = _group_into_batches(chunks, law_results)
-            for risks in pool.map(_scan_batch, batches):
-                raw_risks.extend(risks)
+    sem = asyncio.Semaphore(SCAN_WORKERS)
+    for page in range(1, pages + 1):
+        batches = await run_in_pool(RAG_IO_EXECUTOR, _prepare_page, file_id, page)
+        if batches is None:
+            break
+        for risks in await asyncio.gather(*[_scan_batch(b, sem) for b in batches]):
+            raw_risks.extend(risks)
 
     return {"raw_risks": raw_risks}
 
@@ -274,7 +313,7 @@ def _route_after_scan(state: AnalyseState) -> str:
     return "consolidate"
 
 
-def _summarize_node(state: AnalyseState) -> dict:
+async def _summarize_node(state: AnalyseState) -> dict:
     """少量风险/无风险时跳过 LLM 归并，用代码直接汇总，省一次 LLM 调用（约 20~25s）。"""
     file_id = state["file_id"]
     total = state["total_chunks"]
@@ -306,19 +345,20 @@ def _summarize_node(state: AnalyseState) -> dict:
     }
 
 
-def _consolidate_node(state: AnalyseState) -> dict:
+async def _consolidate_node(state: AnalyseState) -> dict:
     """LLM 归并去重 + 整体评估；失败时降级返回原始扫描结果。"""
     file_id = state["file_id"]
     total = state["total_chunks"]
     raw = state.get("raw_risks", [])
 
     try:
-        consolidated = _consolidate_model.invoke([
-            CONSOLIDATE_PROMPT.format(
+        resp = await _consolidate_model.ainvoke([
+            HumanMessage(content=CONSOLIDATE_PROMPT.format(
                 raw_risks_json=json.dumps(raw, ensure_ascii=False),
                 total_chunks=total,
-            )
+            ))
         ])
+        consolidated = ConsolidatedReport.model_validate(parse_json_object(resp.content))
         return {
             "result": {
                 "file_id": file_id,
@@ -361,31 +401,26 @@ _analyse_graph.add_conditional_edges(
 )
 _analyse_graph.add_edge("summarize", END)
 _analyse_graph.add_edge("consolidate", END)
-_analyse_graph = _analyse_graph.compile(name="analyse_subagent")
+# checkpointer=False：默认 None 时子图会继承父图的 checkpointer 与 thread_id，把分析状态
+# 写进 legal_agent 那条对话的 checkpoint，并在下次运行时 load 回来。分析图是纯计算，
+# 无需要持久化，必须切断继承。
+_analyse_graph = _analyse_graph.compile(name="analyse_subagent", checkpointer=False)
 
 
-def analyze_file(file_id: str) -> dict:
+async def analyze_file(file_id: str) -> dict:
     """对指定 file_id 的文档进行全量法律风险分析。
 
     由 langgraph 编排：load(切片计数) → scan(分页取回+批量检索法条+分批并发扫描) →
     summarize(少量/无风险直接汇总) 或 consolidate(LLM 归并) → 输出最终报告。
     """
-    final = _analyse_graph.invoke(
+    final = await _analyse_graph.ainvoke(
         {"file_id": file_id, "total_chunks": 0, "raw_risks": [], "result": {}}
     )
     return final.get("result") or {"error": "分析失败，请稍后重试。"}
 
 
-class AnalyzerAgent:
-    """保持与 legal/__init__.py 中 AnalyzerAgent.analyze() 调用的兼容。"""
-
-    @staticmethod
-    def analyze(file_id: str) -> dict:
-        return analyze_file(file_id)
-
-
 @tool
-def analyze_document(file_id: str) -> dict:
+async def analyze_document(file_id: str) -> dict:
     """分析法律文档中的法律风险。
 
     接收已上传文档的 file_id，调用 RAG 分析流程，
@@ -395,4 +430,4 @@ def analyze_document(file_id: str) -> dict:
         file_id: 用户上传文档的 file_id
     """
     print("分析工具被调用了")
-    return analyze_file(file_id)
+    return await analyze_file(file_id)

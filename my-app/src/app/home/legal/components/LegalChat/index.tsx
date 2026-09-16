@@ -5,12 +5,18 @@ import { createParser } from "eventsource-parser";
 import SessionSidebar from "../SessionSidebar";
 import ChatArea from "../ChatArea";
 import ChatInput from "../ChatInput";
-import type { Attachment, ChatSession, Message } from "../types";
+import type {
+  Attachment,
+  ChatSession,
+  Message,
+  SessionHistoryResponse,
+  SessionListResponse,
+  SessionListItem,
+} from "../types";
 import styles from "./index.module.scss";
 
-const STORAGE_KEY = "ai-legal-sessions";
-const WELCOME =
-  "您好！我是您的 AI 法律助手。您可以咨询法律问题、上传合同等文档让我分析，或让我代写法律文书。";
+const PAGE_SIZE = 20;
+const UNTITLED = "未命名会话";
 const SUGGESTIONS = [
   "帮我写一份劳动合同",
   "合同条款有哪些常见风险？",
@@ -22,115 +28,236 @@ function createId() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-function emptySession(): ChatSession {
+function toTime(value: string): number {
+  const t = Date.parse(value);
+  return Number.isNaN(t) ? Date.now() : t;
+}
+
+function newChat(): ChatSession {
   const now = Date.now();
   return {
-    id: createId(),
-    threadId: createId(),
+    key: createId(),
+    threadId: "", // 新会话首条消息不带 threadId，由后端生成权威 id 并经 SSE session 事件回传
     title: "新会话",
-    messages: [
-      { id: createId(), role: "assistant", content: WELCOME, createdAt: now },
-    ],
+    messages: [], // 无消息时 ChatArea 展示空态引导，不注入欢迎气泡
     createdAt: now,
     updatedAt: now,
   };
 }
 
-function loadSessions(): ChatSession[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as ChatSession[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+/** 后端 user_session_history 消息 -> 前端 Message（后端未存每条精确时间，按会话起始递增占位）。 */
+function mapHistory(data: SessionHistoryResponse): Message[] {
+  const base = toTime(data.createdAt);
+  return (data.messages ?? []).map((m, i) => ({
+    id: m.messageId || `${m.role}-${i}`,
+    role: m.role,
+    content: m.content ?? "",
+    createdAt: base + i,
+  }));
+}
+
+function dedupeByThread(items: SessionListItem[]): SessionListItem[] {
+  const seen = new Set<string>();
+  const out: SessionListItem[] = [];
+  for (const it of items) {
+    if (seen.has(it.threadId)) continue;
+    seen.add(it.threadId);
+    out.push(it);
   }
+  return out;
 }
 
 export default function LegalChat() {
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [hydrated, setHydrated] = useState(false);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [active, setActive] = useState<ChatSession | null>(null);
+  const [items, setItems] = useState<SessionListItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0); // 已加载到的页码（0=尚未加载）
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
+  const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
+
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [loading, setLoading] = useState(false);
   const [streamDone, setStreamDone] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const historySeqRef = useRef(0); // 递增使过期历史请求失效
+  const autoOpenedRef = useRef(false); // 挂载后只自动打开一次最近会话
 
-  const activeSession =
-    sessions.find((s) => s.id === activeSessionId) ?? null;
-
-  // 挂载后（水合完成）从 localStorage 恢复历史会话：
-  // 初始 state 恒为空数组，保证服务端渲染与客户端首次渲染一致，避免水合错误
-  useEffect(() => {
-    setSessions(loadSessions());
-    setHydrated(true);
-  }, []);
-
-  // 会话持久化到 localStorage（恢复完成前不写入，避免覆盖已有历史）
-  useEffect(() => {
-    if (!hydrated) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
-    } catch {
-      // 存储不可用时忽略
-    }
-  }, [sessions, hydrated]);
-
-  const updateSession = useCallback(
-    (id: string, updater: (s: ChatSession) => ChatSession) => {
-      setSessions((prev) => prev.map((s) => (s.id === id ? updater(s) : s)));
+  /** 拉取某一页会话列表；mode=replace 重载第 1 页，append 用于触底加载下一页。 */
+  const fetchPage = useCallback(
+    async (p: number, mode: "replace" | "append") => {
+      const params = new URLSearchParams({
+        page: String(p),
+        pageSize: String(PAGE_SIZE),
+      });
+      const res = await fetch(`/api/legal/sessions?${params.toString()}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? `请求失败 (${res.status})`);
+      }
+      const data = (await res.json()) as SessionListResponse;
+      const incoming = (data.sessions ?? []).map((s) => ({
+        threadId: s.threadId,
+        title: s.title || UNTITLED,
+      }));
+      setItems((prev) =>
+        mode === "append" ? dedupeByThread([...prev, ...incoming]) : incoming,
+      );
+      setTotal(data.total ?? 0);
+      setPage(p);
     },
     [],
   );
 
-  /** 新建会话 */
+  /** 发送完成后刷新第 1 页，让刚持久化的会话按最新排序回到顶部。 */
+  const refreshList = useCallback(() => {
+    void fetchPage(1, "replace").catch(() => {});
+  }, [fetchPage]);
+
+  // 挂载后加载第 1 页历史会话
+  useEffect(() => {
+    fetchPage(1, "replace")
+      .catch((err: Error) => setListError(err.message || "获取历史会话失败"))
+      .finally(() => setInitialLoading(false));
+  }, [fetchPage]);
+
+  const hasMore = items.length < total;
+
+  /** 触底加载更多 */
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore || initialLoading) return;
+    setLoadingMore(true);
+    try {
+      await fetchPage(page + 1, "append");
+    } catch {
+      // 到底 / 网络异常：保留已加载内容，让用户再次触底重试
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [fetchPage, hasMore, initialLoading, loadingMore, page]);
+
+  /** 新建会话（仅驻留内存，首条消息发出并被后端持久化后才进入历史列表） */
   const handleNewSession = useCallback(() => {
-    const session = emptySession();
-    setSessions((prev) => [session, ...prev]);
-    setActiveSessionId(session.id);
+    abortRef.current?.abort();
+    historySeqRef.current += 1; // 使进行中的历史加载失效，避免其回写当前空态会话
+    setActive(newChat());
     setInput("");
     setAttachments([]);
     setLoading(false);
-    abortRef.current?.abort();
+    setHistoryLoading(false);
+    setStreamDone(false);
   }, []);
 
-  /** 切换历史会话 */
-  const handleSelectSession = useCallback((id: string) => {
-    setActiveSessionId(id);
-    setInput("");
-    setAttachments([]);
-    setLoading(false);
-    abortRef.current?.abort();
-  }, []);
-
-  /** 删除会话：删除当前会话后自动选中最近一条，若无则新建 */
-  const handleDeleteSession = useCallback(
-    (id: string) => {
-      const remaining = sessions.filter((s) => s.id !== id);
-      if (activeSessionId !== id) {
-        setSessions(remaining);
-        return;
-      }
-      if (remaining.length > 0) {
-        const sorted = [...remaining].sort(
-          (a, b) => b.updatedAt - a.updatedAt,
-        );
-        setSessions(remaining);
-        setActiveSessionId(sorted[0].id);
-      } else {
-        const fresh = emptySession();
-        setSessions([fresh]);
-        setActiveSessionId(fresh.id);
-      }
+  /** 点开历史会话：先拉取对话历史再渲染 */
+  const handleSelectSession = useCallback(
+    async (item: SessionListItem) => {
+      if (active?.threadId === item.threadId) return;
+      abortRef.current?.abort();
+      const seq = ++historySeqRef.current;
+      setInput("");
       setAttachments([]);
       setLoading(false);
-      abortRef.current?.abort();
+      setStreamDone(false);
+      setHistoryLoading(true);
+      setActive({
+        key: createId(),
+        threadId: item.threadId,
+        title: item.title,
+        messages: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      try {
+        const params = new URLSearchParams({ threadId: item.threadId });
+        const res = await fetch(`/api/legal/sessions/history?${params.toString()}`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error ?? `请求失败 (${res.status})`);
+        }
+        const data = (await res.json()) as SessionHistoryResponse;
+        if (seq !== historySeqRef.current) return;
+        setActive((prev) =>
+          prev && prev.threadId === item.threadId
+            ? {
+                ...prev,
+                title: data.title || prev.title,
+                messages: mapHistory(data),
+                updatedAt: toTime(data.updatedAt),
+              }
+            : prev,
+        );
+      } catch (err) {
+        if (seq !== historySeqRef.current) return;
+        const msg = err instanceof Error ? err.message : "未知错误";
+        setActive((prev) =>
+          prev && prev.threadId === item.threadId
+            ? {
+                ...prev,
+                messages: [
+                  {
+                    id: createId(),
+                    role: "assistant",
+                    content: `[加载历史失败] ${msg}`,
+                    createdAt: Date.now(),
+                  },
+                ],
+              }
+            : prev,
+        );
+      } finally {
+        if (seq === historySeqRef.current) setHistoryLoading(false);
+      }
     },
-    [activeSessionId, sessions],
+    [active?.threadId],
   );
 
-  /** 添加附件：当前限制最多一个文件，重复选择会替换已有文件 */
+  /** 删除会话：确认后调后端删除（历史+快照），本地移除；删的是当前会话则回到空白新会话 */
+  const handleDeleteSession = useCallback(
+    async (item: SessionListItem) => {
+      if (!window.confirm(`确定删除会话「${item.title}」吗？删除后不可恢复。`)) return;
+
+      // 尚未持久化到后端的本地新会话：仅本地丢弃
+      if (!item.threadId) {
+        if (active?.threadId === item.threadId) handleNewSession();
+        return;
+      }
+
+      setDeletingThreadId(item.threadId);
+      try {
+        const params = new URLSearchParams({ threadId: item.threadId });
+        const res = await fetch(`/api/legal/sessions?${params.toString()}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error ?? `请求失败 (${res.status})`);
+        }
+        setItems((prev) => prev.filter((i) => i.threadId !== item.threadId));
+        setTotal((prev) => Math.max(0, prev - 1));
+        if (active?.threadId === item.threadId) {
+          handleNewSession();
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "未知错误";
+        window.alert(`删除会话失败：${msg}`);
+      } finally {
+        setDeletingThreadId(null);
+      }
+    },
+    [active?.threadId, handleNewSession],
+  );
+
+  // 挂载后若已有历史会话，默认打开最近一个（列表按 updatedAt 倒序，首项即最新）
+  useEffect(() => {
+    if (autoOpenedRef.current) return;
+    if (initialLoading || active || items.length === 0) return;
+    autoOpenedRef.current = true;
+    void handleSelectSession(items[0]);
+  }, [active, handleSelectSession, initialLoading, items]);
+
   const handleAddAttachment = useCallback((file: File) => {
     setAttachments([
       {
@@ -143,23 +270,17 @@ export default function LegalChat() {
     ]);
   }, []);
 
-  /** 移除附件 */
   const handleRemoveAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
-  /** 点击建议问题：填入输入框 */
   const handleUseSuggestion = useCallback((text: string) => {
     setInput(text);
   }, []);
 
-  /**
-   * 调用 AI 后端接口。
-   * 实际请求封装在 /api/legal/askAgent（该服务器路由内部完成用户身份校验，
-   * 校验通过后才转发到后端 /multiAgent），这里负责构造 multipart 表单并解析 SSE 流。
-   */
+  /** 流式请求 AI；仅当 active 仍是发起时那个会话（按 key）才写入，防止中途切换污染其它会话 */
   const sendToAssistant = useCallback(
-    async (sessionId: string, userMsg: Message, threadId: string) => {
+    async (sessionKey: string, threadId: string, userMsg: Message) => {
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -172,35 +293,34 @@ export default function LegalChat() {
         content: "",
         createdAt: Date.now(),
       };
-      updateSession(sessionId, (s) => ({
-        ...s,
-        messages: [...s.messages, assistantMsg],
-        updatedAt: Date.now(),
-      }));
+      setActive((prev) =>
+        prev && prev.key === sessionKey
+          ? { ...prev, messages: [...prev.messages, assistantMsg], updatedAt: Date.now() }
+          : prev,
+      );
 
-      const appendContent = (patch: string) => {
-        updateSession(sessionId, (s) => ({
-          ...s,
-          messages: s.messages.map((m) =>
-            m.id === assistantMsg.id ? { ...m, content: m.content + patch } : m,
-          ),
-          updatedAt: Date.now(),
-        }));
-      };
-
-      const setFileInfo = (fileInfo: { filename: string }) => {
-        updateSession(sessionId, (s) => ({
-          ...s,
-          messages: s.messages.map((m) =>
-            m.id === assistantMsg.id ? { ...m, fileInfo } : m,
-          ),
-          updatedAt: Date.now(),
-        }));
-      };
+      const patch = (fn: (m: Message) => Message) =>
+        setActive((prev) =>
+          prev && prev.key === sessionKey
+            ? {
+                ...prev,
+                messages: prev.messages.map((m) =>
+                  m.id === assistantMsg.id ? fn(m) : m,
+                ),
+                updatedAt: Date.now(),
+              }
+            : prev,
+        );
+      const appendContent = (text: string) =>
+        patch((m) => ({ ...m, content: m.content + text }));
+      const setFileInfo = (fileInfo: { fileId: string; filename: string }) =>
+        patch((m) => ({ ...m, fileInfo }));
 
       try {
         const form = new FormData();
-        form.append("threadId", threadId);
+        if (threadId) {
+          form.append("threadId", threadId);
+        }
         form.append("text", userMsg.content);
         const file = userMsg.attachments?.[0]?.file;
         if (file) {
@@ -229,10 +349,25 @@ export default function LegalChat() {
           onEvent: (event) => {
             try {
               const data = JSON.parse(event.data);
-              if (event.event === "token" && typeof data.text === "string") {
+              if (
+                event.event === "session" &&
+                typeof data.threadId === "string" &&
+                data.threadId
+              ) {
+                // 后端生成的权威 threadId：绑定到当前会话（首条消息后即可获知）
+                setActive((prev) =>
+                  prev && prev.key === sessionKey
+                    ? { ...prev, threadId: data.threadId }
+                    : prev,
+                );
+              } else if (event.event === "token" && typeof data.text === "string") {
                 appendContent(data.text);
-              } else if (event.event === "file_generated" && data.filename) {
-                setFileInfo({ filename: data.filename });
+              } else if (
+                event.event === "file_generated" &&
+                data.fileId &&
+                data.filename
+              ) {
+                setFileInfo({ fileId: data.fileId, filename: data.filename });
               } else if (event.event === "done") {
                 setStreamDone(true);
               } else if (event.event === "error") {
@@ -256,33 +391,17 @@ export default function LegalChat() {
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
         setLoading(false);
+        // 本轮问答已由后端持久化，刷新第 1 页让该会话按最新排序置顶
+        refreshList();
       }
     },
-    [updateSession],
+    [refreshList],
   );
 
-  /** 发送消息：先写入用户消息，再调用 AI 接口 */
+  /** 发送消息：写入用户消息后调用 AI 接口；无活动会话时自动新建（threadId 由后端生成回传） */
   const handleSendMessage = useCallback(() => {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || loading) return;
-
-    // 没有活动会话时自动新建一个
-    let sessionId = activeSessionId;
-    let threadId: string;
-    if (!sessionId) {
-      const fresh = emptySession();
-      setSessions((prev) => [fresh, ...prev]);
-      setActiveSessionId(fresh.id);
-      sessionId = fresh.id;
-      threadId = fresh.threadId;
-    } else {
-      const current = sessions.find((s) => s.id === sessionId);
-      threadId = current?.threadId ?? createId();
-      // 兼容早期 localStorage 里没有 threadId 的会话
-      if (!current?.threadId) {
-        updateSession(sessionId, (s) => ({ ...s, threadId }));
-      }
-    }
+    if ((!text && attachments.length === 0) || loading || historyLoading) return;
 
     const userMsg: Message = {
       id: createId(),
@@ -292,38 +411,78 @@ export default function LegalChat() {
       createdAt: Date.now(),
     };
 
-    updateSession(sessionId, (s) => {
-      // 取用户第一条消息作为会话标题
-      const title =
-        s.messages.length <= 1 && text
-          ? text.slice(0, 20)
-          : s.title;
-      return {
-        ...s,
-        title,
-        messages: [...s.messages, userMsg],
-        updatedAt: Date.now(),
+    let sessionKey = active?.key;
+    let threadId = active?.threadId ?? "";
+    if (sessionKey) {
+      // 复用当前会话：历史会话继续，或已点"新会话"但首条消息未发出的本地会话（threadId 为空）
+      setActive((prev) => {
+        if (!prev || prev.key !== sessionKey) return prev;
+        const isFirstQuestion = !prev.messages.some((m) => m.role === "user");
+        return {
+          ...prev,
+          title: isFirstQuestion ? text.slice(0, 20) || prev.title : prev.title,
+          messages: [...prev.messages, userMsg],
+          updatedAt: Date.now(),
+        };
+      });
+    } else {
+      // 尚未进入任何会话：新建本地会话，threadId 留空交由后端生成
+      const now = Date.now();
+      sessionKey = createId();
+      threadId = "";
+      const fresh: ChatSession = {
+        key: sessionKey,
+        threadId: "",
+        title: text.slice(0, 20) || "新会话",
+        messages: [userMsg],
+        createdAt: now,
+        updatedAt: now,
       };
-    });
+      setActive(fresh);
+    }
 
     setInput("");
     setAttachments([]);
-    sendToAssistant(sessionId, userMsg, threadId);
-  }, [activeSessionId, attachments, input, loading, sendToAssistant, updateSession, sessions]);
+    void sendToAssistant(sessionKey as string, threadId, userMsg);
+  }, [
+    active?.key,
+    active?.threadId,
+    attachments,
+    historyLoading,
+    input,
+    loading,
+    sendToAssistant,
+  ]);
+
+  // 当前活动会话若尚未出现在服务端列表（新建未持久化 / 首页未覆盖），置顶展示
+  const serverHasActive = active
+    ? items.some((i) => i.threadId === active.threadId)
+    : false;
+  const displayItems =
+    active && !serverHasActive
+      ? [{ threadId: active.threadId, title: active.title }, ...items]
+      : items;
 
   return (
     <div className={styles.shell}>
       <SessionSidebar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
+        items={displayItems}
+        activeThreadId={active?.threadId ?? null}
+        loading={initialLoading}
+        loadingMore={loadingMore}
+        hasMore={hasMore}
+        error={listError}
+        deletingThreadId={deletingThreadId}
         onNewSession={handleNewSession}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
+        onLoadMore={loadMore}
       />
       <main className={styles.main}>
         <ChatArea
-          messages={activeSession?.messages ?? []}
+          messages={active?.messages ?? []}
           loading={loading}
+          historyLoading={historyLoading}
           streamDone={streamDone}
           suggestions={SUGGESTIONS}
           onUseSuggestion={handleUseSuggestion}
@@ -335,7 +494,8 @@ export default function LegalChat() {
           attachments={attachments}
           onAddAttachment={handleAddAttachment}
           onRemoveAttachment={handleRemoveAttachment}
-          loading={loading}
+          loading={loading || historyLoading}
+          disabled={historyLoading}
         />
       </main>
     </div>

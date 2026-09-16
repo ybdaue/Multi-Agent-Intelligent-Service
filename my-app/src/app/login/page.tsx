@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signin } from "@/lib/server/login";
 import { getSession } from "@/lib/auth-clients";
@@ -136,9 +137,7 @@ export default function Login() {
             </div>
 
             <div className={styles.forgot}>
-              <a href="#" className={styles.forgotLink} onClick={(e) => e.preventDefault()}>
-                忘记密码？
-              </a>
+              <span className={styles.forgotNote}>忘记密码？请联系管理员重置</span>
             </div>
 
             {error && <p className={styles.error}>{error}</p>}
@@ -152,6 +151,10 @@ export default function Login() {
             </button>
           </form>
 
+          <div className={styles.signupHint}>
+            还没有账号？请联系管理员开通
+          </div>
+
           <div className={styles.features}>
             {features.map((f) => (
               <div key={f.label} className={styles.feature}>
@@ -164,7 +167,14 @@ export default function Login() {
       </div>
 
       <div className={styles.footer}>
-        &copy; {new Date().getFullYear()} AI 智能平台 &mdash; All rights reserved
+        <div>
+          &copy; {new Date().getFullYear()} AI 智能平台 &mdash; All rights reserved
+        </div>
+        <div className={styles.legal}>
+          <Link href="/terms">用户协议</Link>
+          <span className={styles.legalSep}>&middot;</span>
+          <Link href="/privacy">隐私政策</Link>
+        </div>
       </div>
     </div>
   );

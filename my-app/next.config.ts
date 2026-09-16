@@ -9,11 +9,11 @@ const configInit = () => {
       return [
         {
           source: "/api/finance/:path*",
-          destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/finance/:path*`,
+          destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/finance/:path*`,
         },
         {
           source: "/api/agent/:path*",
-          destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/agent/:path*`,
+          destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/agent/:path*`,
         },
       ];
     },

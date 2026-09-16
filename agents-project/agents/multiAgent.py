@@ -130,9 +130,7 @@ def _clean_legal_tool_result(content):
     of = result.get("output_file")
     fname = ""
     if isinstance(of, dict):
-        path = of.get("content", "")
-        if isinstance(path, str):
-            fname = os.path.basename(path)
+        fname = of.get("filename", "")
     elif isinstance(of, str):
         fname = os.path.basename(of)
     if fname:
