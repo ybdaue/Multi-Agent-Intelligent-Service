@@ -1,0 +1,63 @@
+// agent公用表
+model checkpoint {
+  id String @id @default(cuid())
+  // LangGraph 的 checkpoint_ns：根图层是空串，挂在图里的子图各自一段带 task id 的命名空间。
+  // 同一个 thread 下每个 ns 各存各的快照，读的时候必须带上它，否则父图会读回子图的 state。
+  userId       String
+  agentName    String
+  threadId     String
+  checkpointNs String   @default("")
+  checkpointId String
+  state        Json
+  metadata     Json?
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  updatedAt    DateTime @updatedAt @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, agentName, threadId, checkpointNs, checkpointId])
+  @@index([userId, agentName, threadId, checkpointNs])
+  @@index([userId])
+}
+
+model agent_store {
+  id        String   @id @default(cuid())
+  userId    String
+  agentName String
+  key       String
+  value     Json
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, agentName, key])
+  @@index([userId])
+}
+
+model user_session {
+  id        String   @id @default(cuid())
+  userId    String
+  agentName String
+  threadId  String
+  title     String   @default("")
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  user    User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  history user_session_history?
+
+  @@unique([userId, agentName, threadId])
+  @@index([userId, agentName])
+}
+
+model user_session_history {
+  id        String       @id @default(cuid())
+  sessionId String       @unique
+  session   user_session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  agentName String
+  messages  Json
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+}

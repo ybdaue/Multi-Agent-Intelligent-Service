@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from sentence_transformers import SentenceTransformer
 
-# 用户上传切片在向量库中的存活时长（7 天，与 temp_file/created_file 的 expiresAt 一致），
+# 用户上传切片在向量库中的存活时长（7 天，与 temp_file/legal_created_file 的 expiresAt 一致），
 # 超时后由 delete_expired_chunks 清理
 FILE_TTL_SECONDS = 7 * 24 * 60 * 60
 

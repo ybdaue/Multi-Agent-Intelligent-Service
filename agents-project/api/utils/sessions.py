@@ -4,7 +4,7 @@
 (userId, agentName, threadId) 取单个会话的对话历史。
 调用方负责鉴权并传入真实 userId（来自 request.state.user_id）。
 
-写入方在 agents/legal/memory.py：checkin 节点（请求开始存会话行+本轮提问）
+写入方在 agents/legal/utils/memory.py：checkin 节点（请求开始存会话行+本轮提问）
 与 update 节点（每轮结束追加问答），定位 key 与读取端一致。
 """
 from api.utils.db import pg_pool
@@ -31,7 +31,7 @@ def _session_payload(row: tuple) -> dict:
 async def list_sessions(
     user_id: str, agent_name: str = "", page: int = 1, page_size: int = 20
 ) -> tuple[list[dict], int]:
-    """某用户下全部（agent_name 为空）或指定 agent 的会话，按最近更新倒序分页。
+    """某用户全部（agent_name 为空）或指定 agent 的会话，按最近更新倒序分页。
 
     返回 (sessions, total)：sessions 为当前页记录，total 为满足条件的总条数。
     """
@@ -55,7 +55,9 @@ async def list_sessions(
     return [_session_payload(r) for r in rows], total
 
 
-async def delete_session(user_id: str, agent_name: str, thread_id: str) -> bool:
+async def delete_session(
+    user_id: str, agent_name: str, thread_id: str
+) -> bool:
     """删除某用户某 agent 的一个会话：user_session（级联 user_session_history）与 checkpoint 快照。
 
     返回是否删掉了会话行（False 表示会话不存在或不属于该用户/agent）。

@@ -1,7 +1,7 @@
-"""法律库父模块存取 — Postgres laws 表。
+"""法律库父模块存取 — Postgres legal_laws 表。
 
 父模块是法条检索命中子模块后"返回给 LLM 的整段父文本"。子模块在 Chroma(laws_docs)
-与 bm25 表；父模块单独落 PG laws 表（parent_id = {file_id}_P{parent_index}）。
+与 legal_bm25 表；父模块单独落 PG legal_laws 表（parent_id = {file_id}_P{parent_index}）。
 
 本模块为 standalone（不 import agents 包），legal_ingest 用路径加载、RAG 用惰性加载，
 避免触发 agents/__init__.py 的急切导入。
@@ -29,11 +29,11 @@ postgreSQL_URL = os.getenv("postgreSQL_URL")
 if not postgreSQL_URL:
     raise RuntimeError("缺少 postgreSQL_URL，请在 agents-project/.env.development 中配置")
 
-LAWS_TABLE = "laws"
+LAWS_TABLE = "legal_laws"
 
 
 def upsert_parents(parents: list[dict], conn=None) -> bool:
-    """把父模块批量 upsert 进 laws 表（按 parent_id 覆盖），失败返回 False。
+    """把父模块批量 upsert 进 legal_laws 表（按 parent_id 覆盖），失败返回 False。
 
     conn：批量导入时复用同一事务连接（由调用方 commit），传 None 则自开自提交。
     """

@@ -1,20 +1,59 @@
+.slot {
+  margin-top: var(--slot-offset, 0);
+}
+
+.drop {
+  position: relative;
+  /* 以底边中点为支点：落地压扁是往下压，旋转也绕接触点转，不是绕卡片中心整体翻 */
+  transform-origin: 50% 100%;
+  will-change: transform;
+  animation: cardDrop 3.8s linear both;
+  animation-delay: var(--drop-delay, 0s);
+
+  :global(html.intro-skip) & {
+    animation: none;
+    will-change: auto;
+  }
+}
+
+.link {
+  display: block;
+  text-decoration: none;
+}
+
 .card {
   position: relative;
-  border-radius: var(--radius-lg);
+  border-radius: 1.125rem;
   border: 1.5px solid;
-  padding: 1.5rem;
-  transition: all 200ms;
+  padding: 1rem;
+  transition: all 220ms ease;
   cursor: pointer;
   overflow: hidden;
+  rotate: var(--card-tilt, 0deg);
 
   &.active {
     border-color: var(--color-border);
-    background: var(--color-surface);
+    background: linear-gradient(
+      155deg,
+      var(--color-surface) 0%,
+      var(--color-surface) 62%,
+      rgba(99, 102, 241, 0.08) 100%
+    );
+    box-shadow: var(--shadow-sm);
+
+    :global(.dark) & {
+      background: linear-gradient(
+        155deg,
+        var(--color-surface) 0%,
+        var(--color-surface) 70%,
+        rgba(99, 102, 241, 0.14) 100%
+      );
+    }
 
     &:hover {
       border-color: var(--color-primary-light);
-      box-shadow: 0 8px 24px rgba(99, 102, 241, 0.12);
-      transform: translateY(-2px);
+      box-shadow: 0 14px 34px rgba(99, 102, 241, 0.18);
+      transform: translateY(-4px);
     }
 
     &::before {
@@ -32,28 +71,82 @@
     &:hover::before {
       opacity: 1;
     }
+
+    /* 右上角光晕，hover 时亮起 */
+    &::after {
+      content: "";
+      position: absolute;
+      top: -34px;
+      right: -34px;
+      width: 110px;
+      height: 110px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.25), transparent 70%);
+      opacity: 0;
+      transition: opacity 260ms ease;
+      pointer-events: none;
+    }
+
+    &:hover::after {
+      opacity: 1;
+    }
   }
 
   &.comingSoon {
     border-color: var(--color-border);
+    border-style: dashed;
     background: rgba(0, 0, 0, 0.02);
     cursor: default;
 
     :global(.dark) & {
       background: rgba(255, 255, 255, 0.02);
     }
+
+    .icon {
+      background: rgba(0, 0, 0, 0.03);
+      border-color: var(--color-border);
+      filter: grayscale(1);
+      opacity: 0.65;
+
+      :global(.dark) & {
+        background: rgba(255, 255, 255, 0.04);
+      }
+    }
   }
 }
 
+.head {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin-bottom: 0.625rem;
+}
+
 .icon {
-  margin-bottom: 1rem;
-  font-size: 2.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.625rem;
+  border: 1px solid rgba(99, 102, 241, 0.16);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.16), rgba(168, 85, 247, 0.1));
+  font-size: 1.25rem;
   line-height: 1;
+
+  :global(.dark) & {
+    border-color: rgba(129, 140, 248, 0.22);
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.26), rgba(168, 85, 247, 0.16));
+  }
 }
 
 .title {
-  font-size: 1.125rem;
+  flex: 1;
+  min-width: 0;
+  font-size: 0.9375rem;
   font-weight: 600;
+  letter-spacing: -0.01em;
 
   &.activeTitle {
     color: var(--color-text);
@@ -81,9 +174,8 @@
 }
 
 .description {
-  margin-top: 0.5rem;
-  font-size: 0.875rem;
-  line-height: 1.5;
+  font-size: 0.8125rem;
+  line-height: 1.55;
 
   &.activeDesc {
     color: var(--color-text-secondary);
@@ -91,5 +183,65 @@
 
   &.comingSoonDesc {
     color: var(--color-text-tertiary);
+  }
+}
+
+/* 自由落体砸下 → 三次衰减弹跳 → 稳定
+   时间轴按重力排：记下落高度为 H0，落地耗时 ∝ √H0，之后每次弹起的往返耗时 ∝ 2√H，
+   所以 1.44s 落地之后，三次弹跳依次是 1.10s / 0.78s / 0.48s（比例 1 : 0.76 : 0.54 : 0.33）。
+   每一段各自声明缓动：下落越来越快、上升越来越慢，整条轨迹才是抛物线而不是折线。
+   落地瞬间横向撑开纵向压扁（变形量随 --bounce 变），撞得高就压得狠。
+   弹起高度乘 --bounce（0.7~1.5），顶点倾角乘 --wobble（±0.6~1.4，左右随机），
+   这两个系数由各卡片 JS 随机生成 */
+@keyframes cardDrop {
+  0% {
+    transform: translateY(var(--drop-from, -55vh)) rotate(0deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 0.33);
+  }
+  /* 落地：压扁 */
+  38% {
+    transform: translateY(0) rotate(0deg)
+      scale(calc(1 + 0.09 * var(--bounce, 1)), calc(1 - 0.12 * var(--bounce, 1)));
+    animation-timing-function: cubic-bezier(0, 0, 0.58, 1);
+  }
+  /* 迅速弹回原形，同时离地 */
+  40% {
+    transform: translateY(calc(-15px * var(--bounce, 1))) rotate(calc(-1deg * var(--wobble, 1))) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0.67, 0.67, 1);
+  }
+  /* 第一次弹起最高点 */
+  52.5% {
+    transform: translateY(calc(-76px * var(--bounce, 1))) rotate(calc(-4deg * var(--wobble, 1))) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 0.33);
+  }
+  67% {
+    transform: translateY(0) rotate(0deg)
+      scale(calc(1 + 0.05 * var(--bounce, 1)), calc(1 - 0.06 * var(--bounce, 1)));
+    animation-timing-function: cubic-bezier(0, 0, 0.58, 1);
+  }
+  68.5% {
+    transform: translateY(calc(-10px * var(--bounce, 1))) rotate(calc(1deg * var(--wobble, 1))) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0.67, 0.67, 1);
+  }
+  77.5% {
+    transform: translateY(calc(-36px * var(--bounce, 1))) rotate(calc(3deg * var(--wobble, 1))) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 0.33);
+  }
+  87.5% {
+    transform: translateY(0) rotate(0deg)
+      scale(calc(1 + 0.03 * var(--bounce, 1)), calc(1 - 0.035 * var(--bounce, 1)));
+    animation-timing-function: cubic-bezier(0, 0, 0.58, 1);
+  }
+  89% {
+    transform: translateY(calc(-4px * var(--bounce, 1))) rotate(calc(-1deg * var(--wobble, 1))) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0.67, 0.67, 1);
+  }
+  /* 最后一次起伏很小，不再单独做变形 */
+  93.5% {
+    transform: translateY(calc(-14px * var(--bounce, 1))) rotate(calc(-2deg * var(--wobble, 1))) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 0.33);
+  }
+  100% {
+    transform: translateY(0) rotate(0deg) scale(1, 1);
   }
 }

@@ -1,6 +1,6 @@
-"""BM25 关键词检索引擎 — 基于 Postgres bm25 表建索引。
+"""BM25 关键词检索引擎 — 基于 Postgres legal_bm25 表建索引。
 
-供 retrieve_law 多路召回使用：从 Postgres `bm25` 表读全部法条全文，
+供 retrieve_law 多路召回使用：从 Postgres `legal_bm25` 表读全部法条全文，
 用 rank_bm25 构建 BM25Okapi 内存索引并缓存。服务重启后首次查询懒加载。
 
 所有异常内部消化，未就绪时 search() 返回空列表，检索侧自动只用向量路。
@@ -32,7 +32,7 @@ postgreSQL_URL = os.getenv("postgreSQL_URL")
 if not postgreSQL_URL:
     raise RuntimeError("缺少 postgreSQL_URL，请在 agents-project/.env.development 中配置")
 
-BM25_TABLE = "bm25"
+BM25_TABLE = "legal_bm25"
 
 # jieba 未安装时降级为单字切分，避免 import 拖垮整条检索链（bm25 设计上允许降级）
 try:
@@ -76,7 +76,7 @@ def is_ready() -> bool:
 
 
 def init() -> bool:
-    """按需从 bm25 表读取法条全文构建内存索引，进程内只构建一次。
+    """按需从 legal_bm25 表读取法条全文构建内存索引，进程内只构建一次。
 
     并发安全：_init_lock 串行化构建 + double-check，避免冷启动并发首查时
     多线程重复全表读；已就绪时直接返回 True。失败不置 ready，下次可重试。
@@ -106,7 +106,7 @@ def init() -> bool:
             return False
 
         if not rows:
-            print("bm25 表为空，跳过索引构建")
+            print("legal_bm25 表为空，跳过索引构建")
             _index = None
             _ready = False
             return False

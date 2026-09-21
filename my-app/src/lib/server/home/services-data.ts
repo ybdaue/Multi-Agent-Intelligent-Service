@@ -7,7 +7,7 @@ interface ServiceItem {
 }
 
 export const services: ServiceItem[] = [
-  { id: "content", title: "AI 内容生成", description: "智能写作、文案创作、文章生成", icon: "✍️" },
+  { id: "novel", title: "AI 小说生成", description: "小说创作、章节续写、人物设定", icon: "✍️" },
   { id: "legal", title: "AI 法律服务", description: "法律咨询、合同审核、法规检索", icon: "⚖️" },
   { id: "finance", title: "AI 金融服务", description: "财务分析、投资建议、风险评估", icon: "💰" },
   { id: "data", title: "AI 数据分析", description: "数据可视化、趋势预测、报表生成", icon: "📊", comingSoon: true },

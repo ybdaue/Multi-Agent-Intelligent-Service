@@ -74,6 +74,60 @@
   border-top-right-radius: 4px;
 }
 
+/* 下载条 + 复制图标的同一行：与气泡同属 .bubbleWrap 的流内兄弟，占位算进这条消息，
+   不会像绝对定位那样压到下一条。stretch 撑满整行，下载条留左、复制图标顶到最右。
+   空间始终预留，悬浮只切透明度，不会引起布局跳动。 */
+.bubbleActions {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  /* padding + 负 margin 把可悬浮区补到气泡底边，鼠标从气泡移向图标时不会中途消失 */
+  padding-top: 0.375rem;
+  margin-top: -0.375rem;
+
+  /* 把复制图标顶到最右，下载条留在左侧 */
+  .downloadChip {
+    margin-right: auto;
+  }
+}
+
+.copyBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 150ms, color 150ms, border-color 150ms;
+
+  &:hover {
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+
+  /* 键盘 Tab 到按钮时也要可见，否则是个看不见的焦点 */
+  &:focus-visible {
+    opacity: 1;
+  }
+}
+
+/* 鼠标在气泡内、或移到图标上时显示。图标已在气泡外，不能用后代选择器，
+   得用兄弟选择器（.bubbleActions 紧随 .bubble）。 */
+.bubble:hover ~ .bubbleActions .copyBtn,
+.bubbleActions:hover .copyBtn {
+  opacity: 1;
+}
+
 .attachments {
   display: flex;
   flex-wrap: wrap;

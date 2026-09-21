@@ -3,19 +3,6 @@ import { withAuth } from "@/lib/utils/with-auth";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
-/**
- * 将 better-auth 的 cuid 用户 ID 稳定映射为后端可用的正整数。
- * 后端仅把 userId 作为记忆命名空间与输出目录的隔离 key，非真实数据库主键，
- * 因此使用稳定哈希即可（实际碰撞概率可忽略）。
- */
-function hashUserId(id: string): number {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  }
-  return hash;
-}
-
 async function readBackendError(res: Response): Promise<string> {
   try {
     const data = await res.json();
@@ -33,8 +20,6 @@ async function readBackendError(res: Response): Promise<string> {
 }
 
 export const POST = withAuth(async (auth, req) => {
-  const userId = hashUserId(auth.userId);
-
   // 解析客户端 multipart 表单
   let form: FormData;
   try {
@@ -63,7 +48,7 @@ export const POST = withAuth(async (auth, req) => {
 
   let backendRes: Response;
   try {
-    backendRes = await request(`${BACKEND_URL}/api/legal/agent/legalAgent?userId=${userId}`, {
+    backendRes = await request(`${BACKEND_URL}/api/legal/agent/legalAgent`, {
       method: "POST",
       headers: { Authorization: `Bearer ${auth.token}` },
       body: backendForm,

@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
-from fastapi import APIRouter, HTTPException, Form, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request, Form, UploadFile, File
 
 from agents import get_agent
 from api.utils.db import pg_pool
@@ -14,13 +14,10 @@ from api.utils.db import pg_pool
 
 router = APIRouter(prefix="/api/legal/agent", tags=["法律智能体"])
 
-# 小于该阈值时把文件字节内联在请求里交给 agent；更大则只落库，由 preprocessing 查库取字节切片
-_INLINE_FILE_LIMIT = 5 * 1024 * 1024
-
 
 async def _store_upload(
     *,
-    userId: int,
+    userId: str,
     threadId: str,
     originalName: str,
     mimeType: str,
@@ -44,7 +41,7 @@ async def _store_upload(
             """,
             (
                 temp_file_id,
-                str(userId),
+                userId,
                 threadId,
                 fileHash,
                 originalName,
@@ -58,7 +55,7 @@ async def _store_upload(
             # 同会话已上传过相同文件，取既有行 id
             cur = await conn.execute(
                 'SELECT id FROM temp_file WHERE "userId" = %s AND "threadId" = %s AND "fileHash" = %s',
-                (str(userId), threadId, fileHash),
+                (userId, threadId, fileHash),
             )
             row = await cur.fetchone()
         await conn.commit()
@@ -74,7 +71,7 @@ _SSE_HEADERS = {
 
 async def _prepare_input_state(
     *,
-    userId: int,
+    userId: str,
     threadId: str,
     text: str,
     file: Optional[UploadFile],
@@ -101,22 +98,15 @@ async def _prepare_input_state(
             content=content,
         )
 
-        if len(content) <= _INLINE_FILE_LIMIT:
-            # 小文件：字节内联交给 agent，由 preprocessing 切片入向量库
-            input_state["file_source"] = {
-                "type": "bytes",
-                "suffix": suffix,
-                "content": content,
-                "file_id": file_id,
-            }
-        else:
-            # 大文件：不占用请求内存，只传 temp_file 行 id，preprocessing 查库取字节后切片
-            input_state["file_source"] = {
-                "type": "db",
-                "suffix": suffix,
-                "content": temp_file_id,
-                "file_id": file_id,
-            }
+        # 一律只传 temp_file 行 id，由 preprocessing 查库取字节后切片。
+        # 不把字节内联进 state：state 每个超级步都会整份写入 checkpoint 快照，
+        # 内联会让单个快照膨胀到 MB 级，并随快照组一起长期留存。
+        input_state["file_source"] = {
+            "type": "db",
+            "suffix": suffix,
+            "content": temp_file_id,
+            "file_id": file_id,
+        }
     else:
         input_state["file_source"] = None
 
@@ -126,7 +116,7 @@ async def _prepare_input_state(
 async def _stream_agent(
     *,
     agent_name: str,
-    userId: int,
+    userId: str,
     threadId: Optional[str],
     text: str,
     file: Optional[UploadFile],
@@ -141,8 +131,12 @@ async def _stream_agent(
     if not text.strip():
         raise HTTPException(status_code=400, detail="至少上传一段文本")
 
-    # threadId 可选：缺失/为空视为新会话，由后端生成唯一 id，经首个 SSE 事件回传给前端沿用
-    tid = (threadId or "").strip() or uuid.uuid4().hex
+    # threadId 自带归属：新会话由后端生成 "{userId}:{hex}"；客户端传回的一律校验前缀，
+    # 不匹配即拒绝 —— 归属是结构性的，即使将来某条 SQL 漏了 userId 过滤也跨不过去
+    supplied = (threadId or "").strip()
+    if supplied and not supplied.startswith(f"{userId}:"):
+        raise HTTPException(status_code=403, detail="会话不属于当前用户")
+    tid = supplied or f"{userId}:{uuid.uuid4().hex}"
 
     input_state = await _prepare_input_state(
         userId=userId, threadId=tid, text=text, file=file
@@ -248,14 +242,14 @@ async def _stream_agent(
 
 @router.post("/multiAgent")
 async def call_agent(
-    userId: int,
+    request: Request,
     threadId: Optional[str] = Form(None),
     text: str = Form(...),
     file: Optional[UploadFile] = File(None),
 ):
     return await _stream_agent(
         agent_name="multiAgent",
-        userId=userId,
+        userId=request.state.user_id,
         threadId=threadId,
         text=text,
         file=file,
@@ -265,15 +259,19 @@ async def call_agent(
 
 @router.post("/legalAgent")
 async def call_legal_agent(
-    userId: int,
+    request: Request,
     threadId: Optional[str] = Form(None),
     text: str = Form(...),
     file: Optional[UploadFile] = File(None),
 ):
-    """直连 legal_agent 编排图：threadId 可选，缺失即新会话（后端生成并回传）。"""
+    """直连 legal_agent 编排图：threadId 可选，缺失即新会话（后端生成并回传）。
+
+    userId 由全局 auth 中间件从 Bearer token 解析后写入 request.state（better-auth 的 cuid），
+    不再由前端 query 传入 —— 它就是 checkpoint / agent_store / user_session / temp_file 的隔离 key。
+    """
     return await _stream_agent(
         agent_name="legalAgent",
-        userId=userId,
+        userId=request.state.user_id,
         threadId=threadId,
         text=text,
         file=file,

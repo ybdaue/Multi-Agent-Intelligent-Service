@@ -6,7 +6,7 @@
     参数完整率    该工具必填参数是否填全（analyze_document→file_id；consultor→question；
                   draft_document_agent→doc_type+requirement 或 original_file_id+revision_instructions）
     越序率        调了任务栈里排在后面的任务（选了非 next_task 的工具）
-    重复调用率    调了已完成的工具（decision_prompt 明令禁止）
+    重复调用率    调了已完成的工具（DECISION_PROMPT 明令禁止）
     闲聊误调率    标注期望"不调任何工具"（expect_tools 为空）却调了工具的占比
 
 取数：直接调用 agents.legal._assistant_node，只读它返回的 tool_calls；工具本身不执行（见 _common）。

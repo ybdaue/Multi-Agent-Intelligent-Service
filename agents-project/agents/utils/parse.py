@@ -410,7 +410,7 @@ def chunk_text(
 # =============================================================================
 # 法律库父子文档切分（仅 legal_ingest 使用；上传文档仍走 chunk_text）
 # 父模块 = 结构章/条群组，约 parent_min..parent_max 字符；子模块 = 父内约 child_max 的检索单元。
-# 子存 Chroma + bm25（metadata/行带父信息），父存 Postgres laws 表。检索用子召回、返回父全文。
+# 子存 Chroma + legal_bm25（metadata/行带父信息），父存 Postgres legal_laws 表。检索用子召回、返回父全文。
 # =============================================================================
 
 LAW_PARENT_MIN = 800
@@ -615,9 +615,9 @@ def chunk_laws(
        父文本已还原跨子上下文，重叠不必要）。
 
     返回 {"parents": [...], "children": [...]}：
-      parents : [{parent_id, file_id, parent_index, heading, content}]  → PG laws
+      parents : [{parent_id, file_id, parent_index, heading, content}]  → PG legal_laws
       children: [{content, metadata:{file_id, chunk_index, total_chunks,
-                  heading, parent_index, parent_heading}}]               → Chroma / bm25
+                  heading, parent_index, parent_heading}}]               → Chroma / legal_bm25
     """
     text = text.strip()
     if not text:

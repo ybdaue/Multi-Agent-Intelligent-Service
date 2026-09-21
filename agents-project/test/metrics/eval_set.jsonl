@@ -13,7 +13,7 @@
 # ⚠️ 这是种子集，expect_* 是按 Intent_prompt / decision_prompt 的规则人工标注的期望值。
 #    模型判定与标注不一致时，需要人来复核是"模型错"还是"标注错"，不能默认模型错。
 #    retrieval_keywords 是按常识写的常见法律词汇，请按你们的真实法规库核对一遍；
-#    更严谨的做法是给 metric_retrieval.py 加 --from-corpus，从 laws 表构造精确 parent_id 标注。
+#    更严谨的做法是给 metric_retrieval.py 加 --from-corpus，从 legal_laws 表构造精确 parent_id 标注。
 #
 # 覆盖：共 27 条 —— 闲聊 4 / 咨询 12（其中 6 条带检索标注）/ 文件分析 5 / 起草 6
 #       其中带 retrieval_keywords 的 12 条供检索召回率使用，has_file 的 7 条供上下文指代使用

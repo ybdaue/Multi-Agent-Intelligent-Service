@@ -1,10 +1,10 @@
-"""端到端验证：父子切分 → 子入 Chroma/bm25 + 父入 PG laws → 子检索、父返回。
+"""端到端验证：父子切分 → 子入 Chroma/legal_bm25 + 父入 PG legal_laws → 子检索、父返回。
 
 用法（agents-project 下，venv 内）：
     python test/run_laws_pipeline.py
 
 无论流程成功或失败，脚本结束前都会把本用例写入数据库的 sample_law_001 数据清空
-（Chroma laws_docs 子切片 + Postgres bm25 子行 + Postgres laws 父行），可反复重跑。
+（Chroma laws_docs 子切片 + Postgres legal_bm25 子行 + Postgres legal_laws 父行），可反复重跑。
 """
 import importlib.util
 import sys
@@ -41,7 +41,7 @@ def _cleanup_store(RAG, parent_store, legal_ingest, file_id: str) -> None:
     except Exception as e:
         print(f"[清理] Chroma 删除失败: {e}")
 
-    # 2) Postgres bm25 子关键词行
+    # 2) Postgres legal_bm25 子关键词行
     try:
         import psycopg
 
@@ -52,16 +52,16 @@ def _cleanup_store(RAG, parent_store, legal_ingest, file_id: str) -> None:
                     (file_id,),
                 )
             conn.commit()
-        print("[清理] Postgres bm25 子行已清空")
+        print("[清理] Postgres legal_bm25 子行已清空")
     except Exception as e:
-        print(f"[清理] bm25 删除失败: {e}")
+        print(f"[清理] legal_bm25 删除失败: {e}")
 
-    # 3) Postgres laws 父行
+    # 3) Postgres legal_laws 父行
     try:
         n = parent_store.delete_file(file_id)
-        print(f"[清理] Postgres laws 删除父行 {n} 条")
+        print(f"[清理] Postgres legal_laws 删除父行 {n} 条")
     except Exception as e:
-        print(f"[清理] laws 删除失败: {e}")
+        print(f"[清理] legal_laws 删除失败: {e}")
 
 
 def _run_pipeline(parse, RAG, parent_store, legal_ingest) -> None:
@@ -85,8 +85,8 @@ def _run_pipeline(parse, RAG, parent_store, legal_ingest) -> None:
     assert RAG.is_ready(), "RAG 未就绪（Chroma/模型加载失败）"
     assert RAG.upsert_chunks(children, target="laws"), "Chroma 子写入失败"
     legal_ingest.write_bm25_table(children)
-    assert parent_store.upsert_parents(parents), "laws 父表写入失败"
-    print(f"[2] 入库完成: Chroma(laws_docs) 子 {len(children)} + bm25 子行 + PG laws 父 {len(parents)}")
+    assert parent_store.upsert_parents(parents), "legal_laws 父表写入失败"
+    print(f"[2] 入库完成: Chroma(laws_docs) 子 {len(children)} + legal_bm25 子行 + PG legal_laws 父 {len(parents)}")
 
     # ── 3. 子检索 → 父返回（向量路）──
     query = "不得过度收集个人信息"

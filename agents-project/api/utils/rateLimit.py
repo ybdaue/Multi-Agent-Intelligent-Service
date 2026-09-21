@@ -26,8 +26,8 @@ from .db import redis_client
 
 # 默认窗口/阈值（可按需覆盖；整个 API 每用户 20 次/分偏紧，前端轮询频繁可调大）
 WINDOW_SECONDS = 60
-GLOBAL_LIMIT = 200
-PER_USER_LIMIT = 20
+GLOBAL_LIMIT = 500
+PER_USER_LIMIT = 60
 _TOO_MANY = "请求过于频繁，请稍后再试"
 
 # 滑动窗口判断与写入在同一个 Lua 脚本里完成，避免“判断-插入”间的竞态。

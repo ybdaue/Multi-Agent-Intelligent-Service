@@ -1,0 +1,41 @@
+// 法律服务私用表
+model legal_created_file {
+  id           String   @id @default(cuid())
+  userId       String
+  threadId     String
+  originalName String
+  mimeType     String
+  description  String?
+  sizeBytes    Int
+  data         Bytes
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  expiresAt    DateTime @default(dbgenerated("(now() + '7 days'::interval)")) @db.Timestamptz
+
+  @@index([userId, threadId])
+  @@index([expiresAt])
+}
+
+model legal_bm25 {
+  id           String   @id @default(cuid())
+  chunk_id     String   @unique // Chroma laws_docs 的 id：{file_id}_{chunk_index}
+  content      String
+  heading      String?
+  file_id      String
+  chunk_index  Int
+  parent_index Int? // 所属父模块序号（父文本在 legal_laws 表，键 {file_id}_P{parent_index}）
+  created_at   DateTime @default(now()) @db.Timestamptz
+
+  @@index([file_id])
+}
+
+model legal_laws {
+  id           String   @id @default(cuid())
+  parent_id    String   @unique // 父模块 id：{file_id}_P{parent_index}
+  file_id      String
+  parent_index Int
+  heading      String? // 父标题：法规名 / 章标题
+  content      String // 父模块全文（含各子条标题）
+  created_at   DateTime @default(now()) @db.Timestamptz
+
+  @@index([file_id, parent_index])
+}

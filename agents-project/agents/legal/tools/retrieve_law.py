@@ -3,9 +3,9 @@
 供 legal agent 在自判"法律依据不足"时调用，把相关法条原文取回作为证据。
 
 检索采用多路召回：向量检索（Chroma laws_docs 子模块）+ BM25 关键词检索
-（Postgres bm25 表子模块）经 RRF（Reciprocal Rank Fusion）融合，再用交叉编码器
+（Postgres legal_bm25 表子模块）经 RRF（Reciprocal Rank Fusion）融合，再用交叉编码器
 （bge-reranker-v2-m3）在子模块上重排；命中的子随后展开为其所属**父模块整段**
-（父文本存 PG laws 表）返回给调用方，还原整章/条群组上下文。不含用户上传文件。
+（父文本存 PG legal_laws 表）返回给调用方，还原整章/条群组上下文。不含用户上传文件。
 """
 
 from langchain_core.tools import tool

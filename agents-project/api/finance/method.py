@@ -1,8 +1,12 @@
+import asyncio
 import datetime
 import logging
+import math
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 
 os.environ["TQDM_DISABLE"] = "1"
@@ -10,10 +14,27 @@ os.environ["TQDM_DISABLE"] = "1"
 import akshare as ak
 from fastapi import APIRouter, HTTPException, Query
 
+# ── 开关：是否启用周期性行情刷新 ──────────────────────
+# True  = 启动后由后台 asyncio 任务定时刷新全量行情（交易时段每 30s）
+# False = 只在启动时拉一次填缓存，之后不再自动刷新（数据停在启动那一刻）
+# 两种情况下取数都不在事件循环线程上跑，见 _run_off_loop。
+ENABLE_PERIODIC_FETCH = False
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/finance/method", tags=["金融数据方法"])
 
 _cache = {"data": None}
+
+# akshare 取数与 pandas 转换是阻塞、且长时间持 GIL 的同步调用。放专属单线程池，
+# 既离开事件循环线程（否则会卡住同进程的 legal agent 流式响应），也隔离于
+# Starlette 默认线程池，避免互相排队。
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="finance")
+
+
+async def _run_off_loop(func):
+    """把阻塞的同步取数丢到专属线程池执行。"""
+    return await asyncio.get_running_loop().run_in_executor(_EXECUTOR, func)
+
 
 # 排序字段白名单
 _SORT_FIELDS = {"price", "change", "changePercent", "volume", "amount"}
@@ -21,6 +42,10 @@ _SORT_FIELDS = {"price", "change", "changePercent", "volume", "amount"}
 # ── 分时缓存 ─────────────────────────────────────────
 _tick_cache: dict[str, dict] = {}
 _TICK_TTL = 30  # 交易时段内 30s 刷新一次
+
+# ── 后台刷新节奏 ─────────────────────────────────────
+_REFRESH_INTERVAL = 30       # 交易时段每 30s 拉一次全量行情
+_IDLE_RETRY_INTERVAL = 300   # 盘后且缓存仍为空时的重试间隔
 
 # ── 交易日历（懒加载，24h 重拉一次）─────────────────────
 _TRADE_CALENDAR: set[str] = set()
@@ -81,60 +106,139 @@ def _is_9am_clear_time() -> bool:
     return now.hour == 9 and now.minute == 0 and now.second < 10
 
 
-def _fetch_all_stocks():
-    # 东方财富优先：新浪 stock_zh_a_spot 重复调用会被临时封 IP，返回 HTML 阻断页，
-    # 导致 demjson 报 "Can not decode value starting with character '<'"。新浪仅作兜底。
+def _num(value):
+    """把各源返回的字符串/空值/'-'统一成 float，无法解析时返回 None。"""
+    if value is None:
+        return None
     try:
-        df = ak.stock_zh_a_spot_em()
-    except Exception as e:
-        logger.warning("东方财富行情获取失败，回退新浪: %s", e)
-        df = ak.stock_zh_a_spot()
-    records = df.to_dict(orient="records")
-    result = []
-    for row in records:
-        result.append({
+        result = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(result) else result
+
+
+def _rows_from_em(df):
+    return [
+        {
             "symbol": row["代码"],
             "name": row["名称"],
-            "price": row["最新价"],
-            "change": row["涨跌额"],
-            "changePercent": row["涨跌幅"],
-            "volume": row["成交量"],
-            "amount": row["成交额"],
+            "price": _num(row["最新价"]),
+            "change": _num(row["涨跌额"]),
+            "changePercent": _num(row["涨跌幅"]),
+            "volume": _num(row["成交量"]),
+            "amount": _num(row["成交额"]),
+        }
+        for row in df.to_dict(orient="records")
+    ]
+
+
+def _rows_from_tx(df):
+    # code 形如 sh688808；turnover 单位为万元（东财/腾讯成交量单位为手）
+    rows = []
+    for row in df.to_dict(orient="records"):
+        amount = _num(row.get("turnover"))
+        rows.append({
+            "symbol": str(row.get("code") or "")[2:],
+            "name": row.get("name"),
+            "price": _num(row.get("zxj")),
+            "change": _num(row.get("zd")),
+            "changePercent": _num(row.get("zdf")),
+            "volume": _num(row.get("volume")),
+            "amount": amount * 10000 if amount is not None else None,
         })
-    _cache["data"] = result
+    return rows
 
 
-try:
-    _fetch_all_stocks()
-except Exception:
-    # 启动时网络抖动不应导致模块导入失败（否则整个服务起不来），交给后台线程重试
-    logger.exception("启动时加载股票列表失败，等待后台刷新")
+def _rows_from_sina(df):
+    # 代码形如 sh600000；新浪成交量单位为股，换算成手以对齐其他源
+    rows = []
+    for row in df.to_dict(orient="records"):
+        volume = _num(row.get("成交量"))
+        rows.append({
+            "symbol": str(row.get("代码") or "")[2:],
+            "name": row.get("名称"),
+            "price": _num(row.get("最新价")),
+            "change": _num(row.get("涨跌额")),
+            "changePercent": _num(row.get("涨跌幅")),
+            "volume": volume / 100 if volume is not None else None,
+            "amount": _num(row.get("成交额")),
+        })
+    return rows
 
 
-def _background_updater():
+# 统一口径：价格元、成交量手、成交额元。东财最全，腾讯次之，新浪分页抓取易被
+# 临时封 IP（返回 HTML 而非常见的数据结构），故放最后兜底。
+_SOURCES = (
+    ("东方财富", ak.stock_zh_a_spot_em, _rows_from_em),
+    ("腾讯", ak.stock_zh_a_spot_tx, _rows_from_tx),
+    ("新浪", ak.stock_zh_a_spot, _rows_from_sina),
+)
+
+_MIN_ROWS = 1000  # 低于此数量视为残缺响应，不覆盖缓存
+
+
+def _fetch_all_stocks():
+    errors = []
+    for name, fetch, convert in _SOURCES:
+        try:
+            result = convert(fetch())
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            logger.warning("行情源 %s 获取失败: %s", name, e)
+            continue
+        if len(result) < _MIN_ROWS:
+            errors.append(f"{name}: 仅返回 {len(result)} 条")
+            logger.warning("行情源 %s 数据不完整 (%d 条)，尝试下一源", name, len(result))
+            continue
+        _cache["data"] = result
+        logger.info("股票列表已更新: %d 条 (来源: %s)", len(result), name)
+        return
+    raise RuntimeError("全部行情源获取失败 -> " + "; ".join(errors))
+
+
+async def finance_updater_loop() -> None:
+    """行情后台刷新循环，由 server lifespan 以 asyncio 任务拉起。
+
+    启动先拉一次填缓存（缓存为空时 /latest 返空、/query 返 503），此后是否持续
+    刷新由 ENABLE_PERIODIC_FETCH 决定。取数全部经 _run_off_loop 离开事件循环线程，
+    原先这里是 threading.Thread，靠 GIL 抢占，会周期性卡住 legal agent。
+    """
+    try:
+        await _run_off_loop(_fetch_all_stocks)
+    except Exception:
+        # 启动时网络抖动不应导致服务起不来，交给下面重试
+        logger.exception("启动时加载股票列表失败，等待后台刷新")
+
+    if not ENABLE_PERIODIC_FETCH:
+        logger.info("周期性行情刷新已关闭（ENABLE_PERIODIC_FETCH=False）")
+        return
+
     idle_retry_at = 0.0
     while True:
-        time.sleep(30)
+        await asyncio.sleep(_REFRESH_INTERVAL)
+
         # 每天早上 9:00 清除分时缓存
         if _is_9am_clear_time():
             _tick_cache.clear()
             logger.info("分时缓存已清除 (09:00)")
 
-        if not _is_trade_time():
+        if not await _run_off_loop(_is_trade_time):
             # 盘后已有一份数据就待机；但缓存为空（启动那次拉取失败）时必须继续重试，
             # 否则非交易时段启动会一直空着：/latest 返空、/query 一直 503 到下一个交易日。
             # 盘后降频到 5 分钟一次，避免整夜刷屏。
-            if _cache["data"] is not None or time.time() - idle_retry_at < 300:
+            if _cache["data"] is not None or time.time() - idle_retry_at < _IDLE_RETRY_INTERVAL:
                 continue
             idle_retry_at = time.time()
 
         try:
-            _fetch_all_stocks()
+            await _run_off_loop(_fetch_all_stocks)
         except Exception:
             logger.exception("刷新股票数据失败")
 
 
-threading.Thread(target=_background_updater, daemon=True).start()
+def shutdown_finance_executor() -> None:
+    """关服时丢弃排队任务并立即返回，避免在途的行情拉取卡住进程退出。"""
+    _EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 @router.get("/latest")

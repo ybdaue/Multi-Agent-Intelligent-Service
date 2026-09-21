@@ -52,6 +52,9 @@ function mapHistory(data: SessionHistoryResponse): Message[] {
     id: m.messageId || `${m.role}-${i}`,
     role: m.role,
     content: m.content ?? "",
+    // 历史里带出的生成文书，下载条与实时会话渲染一致
+    fileInfo:
+      m.fileInfo?.fileId && m.fileInfo.filename ? m.fileInfo : undefined,
     createdAt: base + i,
   }));
 }

@@ -52,12 +52,12 @@ RAG = _load_module("agents.utils.RAG", "RAG.py")
 _parse = _load_module("agents.utils.parse", "parse.py")
 _bm25 = _load_module("agents.utils.bm25_index", "bm25_index.py")
 _parent_store = _load_module("agents.utils.law_parent_store", "law_parent_store.py")
-# 法律语料专用：父子文档切分（子存 Chroma/bm25，父存 PG laws 表）
+# 法律语料专用：父子文档切分（子存 Chroma/legal_bm25，父存 PG legal_laws 表）
 chunk_laws = _parse.chunk_laws
 
 
 def write_bm25_table(chunks: list[dict], conn=None) -> bool:
-    """把法条切片（已写入 Chroma 的同批数据）同步 upsert 到 Postgres bm25 表。
+    """把法条切片（已写入 Chroma 的同批数据）同步 upsert 到 Postgres legal_bm25 表。
 
     conn：批量导入时复用同一事务连接（由调用方 commit），传 None 则自开自提交。
     """
@@ -185,7 +185,7 @@ def _chroma_file_coverage() -> Optional[dict[str, set[int]]]:
 
 
 def _existing_parent_files() -> Optional[set[str]]:
-    """返回 PG laws 表中已有的 file_id 集合。失败返回 None（不跳过）。"""
+    """返回 PG legal_laws 表中已有的 file_id 集合。失败返回 None（不跳过）。"""
     import psycopg
 
     try:
@@ -194,7 +194,7 @@ def _existing_parent_files() -> Optional[set[str]]:
                 cur.execute(f"SELECT DISTINCT file_id FROM {_parent_store.LAWS_TABLE}")
                 return {r[0] for r in cur.fetchall()}
     except Exception as e:
-        print(f"读取 PG laws 父表覆盖失败（本次不跳过任何文件）: {e}")
+        print(f"读取 PG legal_laws 父表覆盖失败（本次不跳过任何文件）: {e}")
         return None
 
 
@@ -255,7 +255,7 @@ def import_legal_files(force: bool = False, batch_files: Optional[int] = None) -
         pg_conn = psycopg.connect(getattr(_bm25, "postgreSQL_URL"))
     except Exception as e:
         pg_conn = None
-        print(f"警告: 打开 PG 连接失败（bm25 / 父表本次不写）: {e}", flush=True)
+        print(f"警告: 打开 PG 连接失败（legal_bm25 / 父表本次不写）: {e}", flush=True)
 
     def _write_pg(j: dict[str, Any]) -> None:
         if pg_conn is None:
@@ -343,7 +343,7 @@ def import_legal_files(force: bool = False, batch_files: Optional[int] = None) -
                 if have is not None and need <= have and fpath.stem in parent_files:
                     skip = True
             if skip:
-                # 向量已存在不重算，但 bm25 / 父表仍幂等补写（便宜，防单独丢行）
+                # 向量已存在不重算，但 legal_bm25 / 父表仍幂等补写（便宜，防单独丢行）
                 skipped += 1
                 details.append({"file": fpath.name, "status": "skip", "reason": "已存在"})
                 _write_pg({"file": fpath.name, "file_id": fpath.stem,
@@ -378,7 +378,7 @@ def import_legal_files(force: bool = False, batch_files: Optional[int] = None) -
 
 
 def sync_bm25_table() -> dict[str, Any]:
-    """把 Chroma laws_docs 全量同步到 Postgres bm25 表（幂等 upsert），返回写入条数。"""
+    """把 Chroma laws_docs 全量同步到 Postgres legal_bm25 表（幂等 upsert），返回写入条数。"""
     RAG.init()
     if not RAG.is_ready():
         return {"status": "error", "message": "RAG 未就绪（Chroma 不可用）"}
@@ -397,18 +397,18 @@ def sync_bm25_table() -> dict[str, Any]:
     try:
         write_bm25_table(chunks)
     except Exception as e:
-        return {"status": "error", "message": f"写入 bm25 表失败: {e}"}
+        return {"status": "error", "message": f"写入 legal_bm25 表失败: {e}"}
     return {"status": "ok", "synced": len(chunks)}
 
 
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--sync":
-        print("同步 Chroma → bm25 表")
+        print("同步 Chroma → legal_bm25 表")
         result = sync_bm25_table()
         if result["status"] == "error":
             print(f"\n错误: {result['message']}")
             sys.exit(1)
-        print(f"\n同步完成: 共 {result['synced']} 条法条写入 bm25 表")
+        print(f"\n同步完成: 共 {result['synced']} 条法条写入 legal_bm25 表")
         return
 
     args = sys.argv[1:]

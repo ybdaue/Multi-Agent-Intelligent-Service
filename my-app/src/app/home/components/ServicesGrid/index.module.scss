@@ -1,13 +1,121 @@
 .grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 1.25rem;
+  gap: 1rem;
+  /* 卡片宽度上限：列数不变，屏幕更宽时多出来的宽度全部变成卡片之间的间距，
+     首尾两张仍然贴着容器左右两边 */
+  --card-max: 230px;
+  --stagger: 1;
+  justify-content: space-between;
 
   @media (min-width: 640px) {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, minmax(0, var(--card-max)));
+    /* 整排稍微往中间收一点，首尾不再紧贴容器两边 */
+    padding-inline: 2rem;
   }
 
   @media (min-width: 1024px) {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, minmax(0, var(--card-max)));
+  }
+
+  @media (min-width: 1280px) {
+    grid-template-columns: repeat(5, minmax(0, var(--card-max)));
+  }
+
+  @media (max-width: 639px) {
+    --stagger: 0.35;
+  }
+}
+
+/* 打散规则排列：垂直错落 + 轻微倾斜 + 依次掉落 */
+.grid > * {
+  /* 掉落起点：负数表示从上方移入 */
+  --drop-from: -55vh;
+
+  &:nth-child(1) {
+    --drop-delay: 0s;
+    --slot-offset: calc(1.25rem * var(--stagger));
+    --card-tilt: -0.7deg;
+  }
+
+  &:nth-child(2) {
+    --drop-delay: 0.1s;
+    --slot-offset: calc(3rem * var(--stagger));
+    --card-tilt: 0.5deg;
+  }
+
+  &:nth-child(3) {
+    --drop-delay: 0.2s;
+    --slot-offset: calc(0.5rem * var(--stagger));
+    --card-tilt: -0.4deg;
+  }
+
+  &:nth-child(4) {
+    --drop-delay: 0.3s;
+    --slot-offset: calc(2.25rem * var(--stagger));
+    --card-tilt: 0.8deg;
+  }
+
+  &:nth-child(5) {
+    --drop-delay: 0.4s;
+    --slot-offset: calc(0.75rem * var(--stagger));
+    --card-tilt: -0.5deg;
+  }
+
+  &:nth-child(6) {
+    --drop-delay: 0.5s;
+    --slot-offset: calc(3.75rem * var(--stagger));
+    --card-tilt: 0.4deg;
+  }
+
+  /* 第二排的卡片在页面上的位置比第一排低一整行，
+     只移 -55vh 的话下半截还留在视口里，所以按行数补上这一行的距离，
+     让每一排都从同一高度落下。列数不同，第二排的起点也不同 */
+  @media (max-width: 639px) {
+    &:nth-child(2) {
+      --drop-from: calc(-55vh - 200px);
+    }
+
+    &:nth-child(3) {
+      --drop-from: calc(-55vh - 400px);
+    }
+
+    &:nth-child(4) {
+      --drop-from: calc(-55vh - 600px);
+    }
+
+    &:nth-child(5) {
+      --drop-from: calc(-55vh - 800px);
+    }
+
+    &:nth-child(6) {
+      --drop-from: calc(-55vh - 1000px);
+    }
+  }
+
+  @media (min-width: 640px) {
+    &:nth-child(n + 4) {
+      --drop-from: calc(-55vh - 400px);
+    }
+  }
+
+  @media (min-width: 1024px) {
+    &:nth-child(n + 4) {
+      --drop-from: -55vh;
+    }
+
+    &:nth-child(n + 5) {
+      --drop-from: calc(-55vh - 340px);
+    }
+  }
+
+  @media (min-width: 1280px) {
+    &:nth-child(n + 5) {
+      --drop-from: -55vh;
+    }
+
+    &:nth-child(n + 6) {
+      --drop-from: calc(-55vh - 300px);
+    }
   }
 }

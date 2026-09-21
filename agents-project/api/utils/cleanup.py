@@ -1,4 +1,4 @@
-"""过期数据定时清理：向量库切片 + PG temp_file/created_file 行。
+"""过期数据定时清理：向量库切片 + PG temp_file/legal_created_file 行。
 
 由 server lifespan 起一个后台任务周期执行，独立于用户请求触发。
 """
@@ -27,11 +27,11 @@ async def sweep_once() -> None:
     except Exception as e:
         print(f"[cleanup] 向量库清理失败（忽略，下轮重试）: {e}")
 
-    # 2) PG：temp_file / created_file 行级过期清理
+    # 2) PG：temp_file / legal_created_file 行级过期清理
     try:
         async with pg_pool.connection() as conn:
             await conn.execute('DELETE FROM temp_file WHERE "expiresAt" < now()')
-            await conn.execute('DELETE FROM created_file WHERE "expiresAt" < now()')
+            await conn.execute('DELETE FROM legal_created_file WHERE "expiresAt" < now()')
             await conn.commit()
     except Exception as e:
         print(f"[cleanup] 数据库清理失败（忽略，下轮重试）: {e}")

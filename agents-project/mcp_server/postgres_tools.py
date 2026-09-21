@@ -22,8 +22,9 @@ _READONLY = ToolAnnotations(
     description=(
         "对 PostgreSQL 执行一条只读 SELECT 查询，返回 JSON（最多 200 行）。"
         "参数 sql：单条 SELECT（可含 WITH ... SELECT），禁止写操作与多语句。"
-        "可用表：laws / bm25 / temp_file / created_file / user_session / "
-        "user_session_history / agent_store / checkpoint 等。"
+        "可用表：legal_laws / legal_bm25 / legal_created_file / temp_file / "
+        "user_session / user_session_history / agent_store / checkpoint / "
+        "novel / novel_chapter 等。"
     ),
     annotations=_READONLY,
 )

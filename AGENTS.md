@@ -21,7 +21,7 @@
   └─ src/proxy.ts 全局登录守卫（Next 16 的 middleware 新名）
        └─ Next Route Handler 做 BFF：鉴权 → 带 Bearer 转发后端 → SSE 透传
             ├─ /api/legal/askAgent   → 后端 POST /api/legal/agent/legalAgent (multipart, SSE)
-            ├─ /api/legal/download   → 后端 GET  /api/legal/method/download/{userId}/{fileId}
+            ├─ /api/legal/download   → 后端 GET  /api/legal/method/download/{fileId}
             ├─ /api/legal/sessions[/history] → 后端 GET /api/legal/method/sessions[/history]
             ├─ /api/finance/agent    → 后端 POST /api/finance/agent/stream (SSE)
             ├─ /api/finance/stockList|tickChart → 后端 GET /api/finance/method/{latest,tick}
@@ -34,7 +34,7 @@
   ├─ multiAgent：任务路由器（LLM 意图路由 → use_legal_agent / use_finance_agent）
   └─ finance：FinanceAgent 类（LangGraph + tool_registry 行情工具）
 基础设施 (Docker / 本机)
-  ├─ PostgreSQL:5432  my-app 的 Prisma 库（Session / checkpoint / agent_store / user_session / bm25 / laws …）
+  ├─ PostgreSQL:5432  my-app 的 Prisma 库（Session / checkpoint / agent_store / user_session / legal_bm25 / legal_laws …）
   ├─ Chroma:8000      向量库（legal_docs 用户上传 / laws_docs 法规）
   └─ Redis:6379       登录态缓存 + 限流计数
 本地 embedding 模型：agents-project/models/bge-large-zh-v1.5（离线加载，gitignore）
@@ -68,10 +68,10 @@ uvicorn api.server:app --reload --host 0.0.0.0 --port 8080
 # 前置依赖：Docker 里跑 Chroma(host=localhost:8000)、Redis、PostgreSQL；
 #          本地 embedding 模型在 models/bge-large-zh-v1.5（缺失则 RAG 静默不可用）
 
-# 导入法规（父子切分：子→Chroma laws_docs + PG bm25；父→PG laws）
+# 导入法规（父子切分：子→Chroma laws_docs + PG legal_bm25；父→PG legal_laws）
 python agents/utils/legal_ingest.py                 # 幂等，已导入文件自动跳过
 python agents/utils/legal_ingest.py --force --batch 10
-python agents/utils/legal_ingest.py --sync          # 仅把 Chroma laws_docs 重同步到 bm25 表
+python agents/utils/legal_ingest.py --sync          # 仅把 Chroma laws_docs 重同步到 legal_bm25 表
 ```
 
 ### 目录结构
@@ -81,13 +81,13 @@ python agents/utils/legal_ingest.py --sync          # 仅把 Chroma laws_docs �
 | `api/server.py` | FastAPI 入口：lifespan(开 PG 连接池 + 尝试 RAG.init)、挂 4 个 router、装配中间件。**无任何 `@app.get` 路由**（/health 已移除） |
 | `api/utils/config.py` | 注入 sys.path + 按 APP_ENV 选 `.env.development` / `.env.production` |
 | `api/utils/db.py` | `redis_client`（redis.asyncio，decode_responses）+ `pg_pool`（AsyncConnectionPool，惰性 open） |
-| `api/utils/auth.py` | `auth_middleware`：Bearer token → userId。Redis 优先，未命中查 PG `"Session"` 表，有效则按剩余时长（封顶 600s）写回 Redis |
+| `api/utils/auth.py` | `auth_middleware`：Bearer token → userId（better-auth 的 cuid），写 `request.state.user_id`。Redis 优先，未命中查 PG `"Session"` 表，有效则按剩余时长（封顶 600s）写回 Redis |
 | `api/utils/rateLimit.py` | Redis ZSET + 单 Lua 脚本原子滑动窗口；`global_limit_middleware`(200/60s，含未登录) / `user_limit_middleware`(20/60s 每用户) / `rate_limit_dependency()` 工厂 |
 | `api/utils/sessions.py` | 读 `user_session` / `user_session_history`（列表分页、单会话历史） |
 | `api/finance/agent.py` | `/api/finance/agent`：`POST /query`(非流式) + `POST /stream`(SSE，**裸 `data:{token\|thread_id\|done\|error}`，与 legal 侧协议不同**) |
 | `api/finance/method.py` | `/api/finance/method`：`GET /latest`(全市场分页/搜索/排序)、`/query`、`/tick`(分时，30s 缓存)。数据源 akshare，含交易日历懒加载 |
-| `api/legal/agent.py` | `/api/legal/agent`：`POST /multiAgent` 与 `POST /legalAgent`（都是 multipart + SSE），共用 `_stream_agent`；上传文件落 `temp_file`(7天)，≤5MB 内联 bytes、>5MB 只传行 id |
-| `api/legal/method.py` | `/api/legal/method`：`GET /sessions`、`/sessions/history`、`/download/{userId}/{fileId}`（查 `created_file` 表，按 userId 鉴权） |
+| `api/legal/agent.py` | `/api/legal/agent`：`POST /multiAgent` 与 `POST /legalAgent`（都是 multipart + SSE），共用 `_stream_agent`；上传文件落 `temp_file`(7天)，state 里只放行 id，**字节不进 state** |
+| `api/legal/method.py` | `/api/legal/method`：`GET /sessions`、`/sessions/history`、`/download/{fileId}`（查 `legal_created_file` 表，按 `request.state.user_id` 鉴权） |
 | `agents/__init__.py` | 注册表 `_AGENTS = {finance: FinanceAgent, multiAgent, legalAgent}`；`get_agent(name)` 单例化 |
 | `agents/multiAgent.py` | 任务路由器：SystemMessage 路由提示词 + DeepSeek `bind_tools`；工具 `use_legal_agent` / `use_finance_agent`（**后者仅占位回复"暂未开通"**）；对 legal 工具 JSON 结果做清洗防回显；`BoundedMemorySaver` 检查点 |
 | `agents/finance/agent.py` | `FinanceAgent` 类：date_injector → assistant ⇄ tools，MAX_STEPS=10；同步 `run()` + 异步 `stream()`；`BoundedMemorySaver` |
@@ -95,9 +95,9 @@ python agents/utils/legal_ingest.py --sync          # 仅把 Chroma laws_docs �
 | `agents/utils/RAG.py` | Chroma 封装：`legal_docs`(用户上传, TTL 3天) / `laws_docs`(法规)；`upsert_chunks` `retrieve_text`(向量) `retrieve_chunk`(批量) `expand_to_parents`(子→父) `delete_expired_chunks`；embedding=bge-large-zh-v1.5。**host/port 硬编码 `localhost:8000`** |
 | `agents/utils/parse.py` | 文件解析 + 切片：txt/md/json/csv/xml/html/pdf/docx/doc/xlsx/xls；`DEFAULT_CHUNK_SIZE=700`、`DEFAULT_OVERLAP=150` |
 | `agents/utils/legal_ingest.py` | 法规导入 CLI（见上）；父子切分 + 幂等 + `--sync` 同步 BM25 |
-| `agents/utils/bm25_index.py` | 从 PG `bm25` 表懒加载 `BM25Okapi` 内存索引（jieba 分词，缺失则逐字降级）；`_init_lock` 防冷启动并发重复建索引 |
-| `agents/utils/law_parent_store.py` | PG `laws` 父表读写：`upsert_parents` / `get_parents` / `delete_file` |
-| `agents/utils/checkpoint.py` | `create_checkpoint(agent_name)` → PostgresCheckpointSaver，落 `checkpoint` 表；每 (userId, agentName, threadId) 保留 `MAX_SNAPSHOTS=20`（超限同事务删最旧）；serde=msgpack+base64 存 jsonb |
+| `agents/utils/bm25_index.py` | 从 PG `legal_bm25` 表懒加载 `BM25Okapi` 内存索引（jieba 分词，缺失则逐字降级）；`_init_lock` 防冷启动并发重复建索引 |
+| `agents/utils/law_parent_store.py` | PG `legal_laws` 父表读写：`upsert_parents` / `get_parents` / `delete_file` |
+| `agents/utils/checkpoint.py` | `create_checkpoint(agent_name)` → PostgresCheckpointSaver，落 `checkpoint` 表；行按 (userId, agentName, threadId, **checkpointNs**, checkpointId) 定位，ns 必须参与读写（子图快照与父图各存各的）；每 thread 保留最近 `MAX_SNAPSHOTS=5` 个**根图层**快照及其之后的全部子图快照（超限同事务删旧）；serde=msgpack+base64 存 jsonb |
 | `agents/utils/agent_store.py` | `create_agent_store(agent_name)` → PostgresStore（LangGraph BaseStore），落 `agent_store` 表；**userId 约定取 namespace 末位**；未实现 ListNamespacesOp |
 | `agents/utils/boundMemory.py` | `BoundedMemorySaver(max_threads=10)` LRU 检查点，防长驻 OOM。现仅 multiAgent / finance 用（legal 已换 PG） |
 | `agents/utils/models.py` | `create_chat_model(provider, model, ...)`（openai/deepseek/zhipu|glm/qwen/guiji）；`MainModel` / `IntentModel` / `CompressModel`；`RerankModel(query, docs, top_n)` 直连 SiliconFlow `/v1/rerank`（bge-reranker-v2-m3）。当前 MainModel 走硅基流动 `deepseek-ai/DeepSeek-V4-Flash` |
@@ -105,7 +105,7 @@ python agents/utils/legal_ingest.py --sync          # 仅把 Chroma laws_docs �
 | `agents/legal/memory.py` | `checkin`(图首落库本轮提问) / `load_memory`(读画像+摘要) / `update`(会话持久化 + 画像更新 + 摘要压缩)；直接 psycopg 同步连接 |
 | `agents/legal/subagents/analysize.py` | `analyze_document` 工具：分页取切片 → `retrieve_chunk` 批量 top5 法条 → 分批判险 → 归并去重 |
 | `agents/legal/subagents/consultor.py` | `consultor` 工具：`create_agent` + `retrieve_law_basis`，强制先检索后作答 |
-| `agents/legal/subagents/draftor.py` | `draft_document_agent` 工具：LLM 生成 → python-docx → 字节写入 PG `created_file`（返回 file_id + filename，不落盘） |
+| `agents/legal/subagents/draftor.py` | `draft_document_agent` 工具：LLM 生成 → python-docx → 字节写入 PG `legal_created_file`（返回 file_id + filename，不落盘） |
 | `agents/legal/tools/retrieve_law.py` | **法条检索唯一出口**：向量(Chroma) + BM25(PG) → RRF 融合 → 交叉编码器重排 → 子命中展开为父模块整段 |
 | `tool_registry/` | LangChain 工具注册表：`__init__.py` 的 `register(category, tool)` / `get_tools(category)`；`ak.py` 提供 `get_a_stock_price`（6位代码 → 6→.SH / 0,3→.SZ），注册在 `"finance"` 类目；`postgres.py` / `chroma.py` 提供只读查询与语义检索，注册在 `"database"` 类目。**原名 `mcp/`，因遮蔽官方 `mcp` SDK 而改名**。`get_tools(category)` = 本地注册 + 外部 MCP 工具合并 |
 | `mcp_server/` | **对外提供**的 MCP Server（官方 `mcp` SDK，v2 的 `MCPServer`，`from mcp.server.mcpserver import MCPServer`）：`server.py` 建实例 + `lifespan` 生命周期；`postgres_tools.py` / `chroma_tools.py` 用 `@mcp.tool(...)` 注册并带 `ToolAnnotations`（只读/幂等/无副作用）。入口 `python -m mcp_server`（传输暂用 SDK 默认 stdio）。工具实现直接复用 `tool_registry` 的纯函数，两处共用一份逻辑 |
@@ -158,8 +158,11 @@ START → checkin → preprocessing → Intent → load_memory → assistant ⇄
 - 上传文件：`file_id = md5(内容)`，同内容重复上传靠 Chroma upsert 原地覆盖去重；
   同会话(userId+threadId)同 hash 在 `temp_file` 走唯一键复用行。
 - 用户上传切片 TTL=3 天（`FILE_TTL_SECONDS`）。
-- `threadId` 可缺省：缺失即新会话，后端生成 uuid 并经首个 SSE `session` 事件回传，前端沿用。
-- `download` 按 `fileId` 查 `created_file` 表（限定同一 userId），agent 产物不落盘。
+- `threadId` 自带归属：格式 `{userId}:{uuid}`，新会话由后端生成并经首个 SSE `session` 事件回传，
+  前端沿用；客户端传回的一律校验前缀，不匹配即 403（归属是结构性的，不依赖每条 SQL 都记得带 userId 过滤）。
+- `analysis_result` / `answer_result` / `output_file` 是**本轮产物**：`update` 节点轮末统一清空
+  （`memory.py` 的 `_clear_artifacts`），不要在跨轮逻辑里依赖它们（要跨轮的信息写进 `summary`）。
+- `download` 按 `fileId` 查 `legal_created_file` 表（限定同一 userId），agent 产物不落盘。
 - Redis 挂掉时：鉴权失败（查不到 token → 401）；**限流 fail-open 放行**。二者行为不一致，是刻意的。
 
 ---
@@ -202,7 +205,7 @@ npx prisma generate
 | `/api/auth/[...all]` | better-auth（`src/proxy.ts` 对其放行） |
 | `/api/chat` | AI SDK `streamText` 直连 DeepSeek（通用闲聊，**不经**后端 agent） |
 | `/api/legal/askAgent` | 后端 `POST /api/legal/agent/legalAgent`，multipart + SSE 原样透传 |
-| `/api/legal/download` | 后端 `GET /api/legal/method/download/{userId}/{fileId}` |
+| `/api/legal/download` | 后端 `GET /api/legal/method/download/{fileId}` |
 | `/api/legal/sessions` | 后端 `GET /api/legal/method/sessions` |
 | `/api/legal/sessions/history` | 后端 `GET /api/legal/method/sessions/history` |
 | `/api/finance/agent` | 后端 `POST /api/finance/agent/stream`，SSE 透传 |
@@ -220,8 +223,8 @@ npx prisma generate
   `updateAge=0`、`disableSessionRefresh=false`（即每个请求都续期）。Prisma adapter，
   baseURL=`NEXT_PUBLIC_BETTER_AUTH_URL`。
 - `src/lib/server/get-session-auth.ts`：取 better-auth 会话并**从 cookie 里切出数据库 `Session.token`**
-  （cookie 形如 `rawToken.signature`），连同 userId 交给 BFF 转发给后端做 Redis 校验。
-  这是前端 → 后端鉴权的唯一桥。
+  （cookie 形如 `rawToken.signature`），作为 Bearer 交给 BFF 转发给后端做 Redis 校验。
+  这是前端 → 后端鉴权的唯一桥 —— userId 不再经前端传递，由后端从该 token 反查。
 - `src/lib/utils/with-auth.ts`：BFF 路由包装器，未登录直接 401 JSON。
 - `src/lib/env.ts`：zod 校验 `DATABASE_URL`(必填)、`NEXT_PUBLIC_BETTER_AUTH_URL`、`NEXT_PUBLIC_API_URL`、
   `APIKEY`(可选)、`TICKFLOW_KEY`(必填)。
@@ -241,10 +244,11 @@ npx prisma generate
 
 ## 四、跨项目协作要点（高频坑）
 
-1. **userId 是哈希整数**：前端把 better-auth 的 cuid 用 `hashUserId()` 转成正整数传后端；
-   后端只把它当记忆命名空间 / `output` 目录 key / PG 行隔离 key，**不是**数据库主键。
-   注意该哈希函数在 `askAgent`、`download`、`sessions` 三个 route 里**各抄了一份**，
-   改一处务必同步另外两处。
+1. **userId = better-auth 的 cuid，由后端自己从 token 解析**：前端**不再传** userId，
+   BFF 只带 `Authorization: Bearer <sessionToken>`。后端 `auth_middleware` 把它换成 cuid
+   写进 `request.state.user_id`，端点一律从这里取（`api/legal/agent.py`、`api/legal/method.py`）。
+   它同时是 `checkpoint` / `agent_store` / `user_session` / `temp_file` / `novel` 的隔离 key，
+   且**就是真实主键** —— 这几张表都有 `ON DELETE CASCADE` 外键指向 `User.id`，注销用户会连带清空。
 2. **端口**：后端 API `8080`，Chroma `8000`。后端默认连 Chroma `localhost:8000`（硬编码在 `RAG.py`）。
 3. **SSE 有两套协议**：legal 侧用 `event:` 命名事件；finance 侧用裸 `data:`。改动两端要同步。
 4. **Chroma 起不来则 RAG 静默不可用**：lifespan 里 `RAG.init()` 失败只 `pass`。
@@ -269,7 +273,7 @@ npx prisma generate
   但 `api/utils/config.py` **只读 `.env.development` / `.env.production`**，从不读 `.env`；
   且 `.env.example` 已删除。README 的接口清单也需要按上一节的路由表重写。
 - `agents-project/tools/`、`agents-project/skills/` 是空目录。
-- 前端 `hashUserId` / `readBackendError` / `BACKEND_URL` 在多个 route 里重复定义，宜抽公共模块。
+- 前端 `readBackendError` / `BACKEND_URL` 在多个 route 里重复定义，宜抽公共模块。
 - `agents/legal/__init__.py` 的 `_astream_assistant_response` 与 `agents/multiAgent.py` 的
   `call_model` 尾部流式累加 + tool_calls 合并逻辑几乎逐行重复，宜抽到 `agents/utils/streaming.py`。
 - 前端 `services-data.ts` 与 `/api/func` 的服务卡片列表重复维护。
@@ -280,5 +284,5 @@ npx prisma generate
 - AI 图片/视频、数据分析、代码助手等前端为 disabled/comingSoon 占位。
 - 法务长期记忆已从 InMemoryStore 迁到 Postgres（`agent_store` 表），多实例可用；
   multiAgent / finance 仍用进程内 `BoundedMemorySaver`（重启即失）。
-- 用户上传切片 3 天 TTL、`BoundedMemorySaver(max_threads=10)`、legal 快照上限 20 —— 都是刻意的防 OOM 策略，改动需谨慎。
+- 用户上传切片 3 天 TTL、`BoundedMemorySaver(max_threads=10)`、legal 快照上限 5 —— 都是刻意的防 OOM 策略，改动需谨慎。
 - `SILICONFLOW_API_KEY` 若失效，会连带影响 MainModel/IntentModel/CompressModel/RerankModel 全线。

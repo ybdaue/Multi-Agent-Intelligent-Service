@@ -5,7 +5,7 @@
 数据库安全约束（改动本目录时务必保持）：
     只调用 agents.legal 的**节点函数**（_intent_node / _assistant_node）——它们是纯函数 +
     模型调用，不访问数据库。**不运行编译后的 legal_agent 图**，因为图内 checkin/update 直连
-    PostgreSQL 写会话表、preprocessing 写 Chroma、draft_document_agent 写 created_file。
+    PostgreSQL 写会话表、preprocessing 写 Chroma、draft_document_agent 写 legal_created_file。
     工具执行只用内存里的合成 ToolMessage 模拟，不进入 ToolNode。
     （一个例外：本目录的检索指标只读 Chroma / PG，不做任何写入。）
 
@@ -252,8 +252,8 @@ def _usage_from_llm_result(response) -> dict | None:
 
 
 # _intent_node 只返回解析后的 dict，不暴露响应对象，拿不到 token 用量。
-# 该节点引用的是 agents.legal 的模块级全局 Intent_model，所以在调用时替换成带回调的绑定即可
-# 采集到它的用量——只影响本进程的用量统计，不改仓库里任何代码，也不影响图的行为。
+# 该节点引用的是 agents.legal.utils.model 的模块级全局 Intent_model，所以在调用时替换成
+# 带回调的绑定即可采集到它的用量——只影响本进程的用量统计，不改仓库里任何代码，也不影响图的行为。
 _tap = None
 _tap_installed = False
 
@@ -266,7 +266,7 @@ def _ensure_usage_tap():
     try:
         from langchain_core.callbacks import BaseCallbackHandler
 
-        import agents.legal as legal_mod
+        import agents.legal.utils.model as legal_mod
 
         class _UsageTap(BaseCallbackHandler):
             def __init__(self):
@@ -297,7 +297,7 @@ def ensure_ttft_probe():
     （_summary_node 用的 _summarizer_model）。意图识别与调度轮都是 disable_streaming=True，
     不吐 token，所以"用户感知的首字"必须把这两段耗时也算进去（见 metric_ttft）。
 
-    只在本进程内替换 agents.legal 的模块级引用，不改仓库代码、不影响图行为、不碰数据库。
+    只在本进程内替换 agents.legal.utils.model 的模块级引用，不改仓库代码、不影响图行为、不碰数据库。
     """
     global _ttft_probe, _ttft_installed
     if _ttft_installed:
@@ -306,7 +306,7 @@ def ensure_ttft_probe():
     try:
         from langchain_core.callbacks import BaseCallbackHandler
 
-        import agents.legal as legal_mod
+        import agents.legal.utils.model as legal_mod
 
         class _TTFTProbe(BaseCallbackHandler):
             def __init__(self):
@@ -381,7 +381,8 @@ async def _collect_one(case: dict, tap=None) -> dict:
     """
     from langchain_core.messages import ToolMessage
 
-    from agents.legal import TOOL_TO_TASK, _assistant_node, _intent_node
+    from agents.legal import _assistant_node, _intent_node
+    from agents.legal.utils.results import TOOL_TO_TASK
 
     query = case.get("query", "")
     has_file = bool(case.get("has_file"))
@@ -583,7 +584,7 @@ def recompute_step_order(trace: dict, case: dict) -> None:
     依赖顺序为准，回放实际工具序列重算，对 fresh 和缓存 trace 都一致。
     判定同时写入 trace["tools_seq_ok"]，便于其它指标直接读。
     """
-    from agents.legal import TOOL_TO_TASK
+    from agents.legal.utils.results import TOOL_TO_TASK
 
     order = [t for t in (case.get("expect_tasks") or [])]
     done: set[str] = set()

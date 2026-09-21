@@ -1,9 +1,9 @@
 """Postgres 版 LangGraph 长期记忆 store，落库到 my-app 的 agent_store 表。
 
 每个实例绑定一个 agent 名（构造时传入）。行级定位：
-  - userId   约定取 namespace 的最后一个元素（当前 legal 用 ("memory", user_id)）
+  - userId    约定取 namespace 的最后一个元素（当前 legal 用 ("memory", user_id)）
   - agentName 构造时绑定
-  - key      把整个 namespace + key 拼成完整路径存进 key 列，
+  - key       把整个 namespace + key 拼成完整路径存进 key 列，
             不同 namespace 类别（如 memory / thread 摘要）互不串。
 
 用法（替换 compile(store=...) 里的 InMemoryStore）：
@@ -121,7 +121,7 @@ class PostgresStore(BaseStore):
             ) from exc
         await conn.execute(
             'INSERT INTO agent_store (id, "userId", "agentName", key, value, "createdAt", "updatedAt") '
-            "VALUES (%s, %s, %s, %s, %s::jsonb, now(), now()) "
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, now(), now()) "
             'ON CONFLICT ("userId", "agentName", key) '
             "DO UPDATE SET value = EXCLUDED.value, \"updatedAt\" = now()",
             [uuid.uuid4().hex, user, self.agent_name, fq, value_json],
@@ -210,7 +210,7 @@ class PostgresStore(BaseStore):
             ) from exc
         conn.execute(
             'INSERT INTO agent_store (id, "userId", "agentName", key, value, "createdAt", "updatedAt") '
-            "VALUES (%s, %s, %s, %s, %s::jsonb, now(), now()) "
+            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, now(), now()) "
             'ON CONFLICT ("userId", "agentName", key) '
             "DO UPDATE SET value = EXCLUDED.value, \"updatedAt\" = now()",
             [uuid.uuid4().hex, user, self.agent_name, fq, value_json],

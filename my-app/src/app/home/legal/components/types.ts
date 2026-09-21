@@ -42,11 +42,14 @@ export interface SessionListItem {
   title: string;
 }
 
-/** 后端 user_session_history.messages 里单条消息的原始结构。 */
+/** 后端 user_session_history.messages 里单条消息的原始结构。
+ * fileInfo: 该轮生成的文书（由 agent 写入，历史会话据此还原下载条）；老数据没有此字段。
+ */
 export interface RemoteMessage {
   role: MessageRole;
   content: string;
   messageId: string;
+  fileInfo?: FileInfo;
 }
 
 export interface SessionHistoryResponse {

@@ -1,0 +1,69 @@
+// 公用表
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  name          String?
+  image         String?
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  sessions     Session[]
+  accounts     Account[]
+  checkpoints  checkpoint[]
+  agentStores  agent_store[]
+  userSessions user_session[]
+  novels       novel[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime @db.Timestamptz(3)
+  token     String   @unique
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  ipAddress String?
+  userAgent String?
+
+  userId String
+  user   User   @relation(references: [id], fields: [userId], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime? @db.Timestamptz(3)
+  refreshTokenExpiresAt DateTime? @db.Timestamptz(3)
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @db.Timestamptz(3)
+
+  user User @relation(references: [id], fields: [userId], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model temp_file {
+  id           String   @id @default(cuid())
+  userId       String
+  threadId     String
+  fileHash     String
+  originalName String
+  mimeType     String
+  description  String?
+  sizeBytes    Int
+  data         Bytes
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  expiresAt    DateTime @default(dbgenerated("(now() + '7 days'::interval)")) @db.Timestamptz
+
+  @@unique([userId, threadId, fileHash])
+  @@index([expiresAt])
+}

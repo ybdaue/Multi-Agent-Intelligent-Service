@@ -32,15 +32,22 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"[server] 外部 MCP 工具未接入（{exc}）")
     cleanup_task = asyncio.create_task(cleanup_loop(), name="ttl-cleanup")
+    # 不 await：首拉在专属线程池里进行，服务不等它就开始接收请求（这段时间
+    # /latest 返空、/query 返 503「数据正在初始化」）。是否持续刷新由
+    # finance.method.ENABLE_PERIODIC_FETCH 控制。
+    finance_task = asyncio.create_task(finance_updater_loop(), name="finance-updater")
     try:
         yield
     finally:
-        # 关闭时：先停定时清理，再断开 MCP 连接（Chroma 客户端自动断开）
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
+        # 关闭时：先停后台任务，再断开 MCP 连接（Chroma 客户端自动断开）
+        for task in (cleanup_task, finance_task):
+            task.cancel()
+        for task in (cleanup_task, finance_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        shutdown_finance_executor()
         await close_mcp()
         await pg_pool.close()
 
@@ -65,13 +72,26 @@ app.middleware("http")(user_limit_middleware)
 app.middleware("http")(auth_middleware)
 app.middleware("http")(global_limit_middleware)
 
-# 各功能域路由：finance / legal 各自独立成模块
+# 各功能域路由：finance / legal / novel 各自独立成模块
 from .finance.agent import router as finance_agent_router
-from .finance.method import router as finance_method_router
+# 后台行情循环在 lifespan 里才被调用，此处导入即够（名字在运行时解析）
+from .finance.method import (
+    finance_updater_loop,
+    router as finance_method_router,
+    shutdown_finance_executor,
+)
 from .legal.method import router as legal_method_router
 from .legal.agent import router as legal_agent_router
+from .novel.agent import router as novel_agent_router
+# 开书：独立成图、独立 checkpoint 名，只在「新建小说」弹窗里用
+from .novel.setup import router as novel_setup_router
+# 小说侧的只读查询口：这一章的台账、这本书的改动清单
+from .novel.method import router as novel_method_router
 
 app.include_router(finance_agent_router)
 app.include_router(finance_method_router)
 app.include_router(legal_method_router)
 app.include_router(legal_agent_router)
+app.include_router(novel_agent_router)
+app.include_router(novel_setup_router)
+app.include_router(novel_method_router)

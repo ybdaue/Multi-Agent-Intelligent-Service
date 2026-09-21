@@ -1,0 +1,418 @@
+// 小说服务私用表
+
+// 关联目标类型：决定 *_ref.refId 指向哪张表
+enum RefType {
+  character //novel_character
+  faction //novel_faction
+  outline //novel_outline
+  timeline //novel_timeline
+  chronicle //novel_chronicle
+  foreshadowing //novel_foreshadowing
+  item //novel_item
+  inspiration //novel_inspiration
+  world_rule //novel_world_rule
+}
+
+// 改动波及的对象类型：sourceType（改的是谁）与 targetType（波及到谁）共用这一套取值。
+// 比 RefType 多出 novel / chapter / state / relation —— 小说本身、章节、章节状态快照、角色关系
+// 都不在 ref 体系里，但都是能被改动波及的东西。
+enum ImpactTarget {
+  novel
+  chapter
+  state //novel_chapter_state
+  outline
+  timeline
+  chronicle
+  character
+  faction
+  item
+  relation
+  world_rule
+  foreshadowing
+}
+
+// 受影响的性质：决定这一条该怎么改，也是给用户看的分类。
+enum ImpactReason {
+  name_ref //正文写了旧名字/旧称呼，字面替换即可
+  stale_value //正文描述了已过时的属性/数值，与改动后的设定矛盾
+  state_conflict //角色状态轨迹（境界/位置/处境）从某一章起对不上
+  fk_dangling //外键仍指向已删/已并的实体，成了悬空引用
+  order_shift //章节增删或重排，正文里写的「第 X 章」这类文字指代对不上了（表里的章节引用已按 id 存，不受重排影响）
+  plot_conflict //情节逻辑与改动后的设定不兼容
+  outline_conflict //大纲/时间线/编年史的描述与改动后的内容不符
+  redundant //改动使这一段/这一条变成冗余
+}
+
+// 处理优先级
+enum ImpactSeverity {
+  must_fix //确定性错误，不改就是坏的
+  review //该不该改要人来判断
+  info //仅供参考
+}
+
+// 处理进度
+enum ImpactStatus {
+  pending //已列出，还没问过用户
+  accepted //用户同意改
+  skipped //用户决定不改，先放着
+  fixed //已改完
+}
+
+model novel {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String   @default("") //标题
+  wordCount Int      @default(0) //字数
+  tropes    String? //小说套路
+  style     String? //小说风格
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chapters       novel_chapter[]
+  outlines       novel_outline[]
+  characters     novel_character[]
+  rules          novel_world_rule[]
+  timelines      novel_timeline[]
+  factions       novel_faction[]
+  chronicles     novel_chronicle[]
+  items          novel_item[]
+  relations      novel_relation[]
+  inspirations   novel_inspiration[]
+  foreshadowings novel_foreshadowing[]
+  changeImpacts  novel_change_impact[]
+
+  @@index([userId])
+}
+
+model novel_chapter {
+  id          String   @id @default(cuid())
+  novelId     String
+  title       String   @default("") //章节标题
+  order       Int      @default(0) //章节序号
+  status      String   @default("draft") //章节状态
+  content     String   @default("") //内容
+  pastSummary Json? //过去章节总结
+  summary     String? //章节精简
+  wordCount   Int      @default(0) //字数
+  createdAt   DateTime @default(now()) @db.Timestamptz
+  updatedAt   DateTime @updatedAt @db.Timestamptz
+
+  novel        novel                       @relation(references: [id], fields: [novelId], onDelete: Cascade)
+  state        novel_chapter_state?
+  refs         novel_chapter_ref[]
+  inspirations novel_chapter_inspiration[]
+
+  @@unique([novelId, order])
+}
+
+// 单章的故事状态快照，用于跨章一致性检查
+model novel_chapter_state {
+  id               String   @id @default(cuid())
+  chapterId        String   @unique
+  protagonistState String? //主角状态（境界 / 位置 / 心态等）
+  storyTime        String? //该章结束时的故事内时间
+  eventProgress    String? //事件进度
+  worldState       String? //世界 / 势力局势
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  updatedAt        DateTime @updatedAt @db.Timestamptz
+
+  chapter novel_chapter @relation(references: [id], fields: [chapterId], onDelete: Cascade)
+}
+
+model novel_outline {
+  id             String   @id @default(cuid())
+  novelId        String
+  status         String //大纲状态
+  startChapterId String? //适用起始章节（novel_chapter.id）
+  endChapterId   String? //适用结束章节（novel_chapter.id）
+  order          Int      @default(0) //排序
+  content        String //大纲内容
+  createdAt      DateTime @default(now()) @db.Timestamptz
+  updatedAt      DateTime @updatedAt @db.Timestamptz
+
+  novel novel               @relation(references: [id], fields: [novelId], onDelete: Cascade)
+  refs  novel_outline_ref[]
+
+  @@index([novelId, order])
+}
+
+model novel_character {
+  id          String   @id @default(cuid())
+  novelId     String
+  name        String //姓名
+  sex         String //性别
+  age         String //年龄
+  birthYear   String //出生年份
+  deathYear   String //死亡年份
+  description String //描述
+  identity    String //身份
+  personality String //性格
+  ability     String //能力
+  role        String   @default("配角") //角色身份：主角 / 配角 / 反派
+  createdAt   DateTime @default(now()) @db.Timestamptz
+  updatedAt   DateTime @updatedAt @db.Timestamptz
+
+  novel novel        @relation(references: [id], fields: [novelId], onDelete: Cascade)
+  items novel_item[]
+
+  @@unique([novelId, name])
+  @@index([novelId, role])
+}
+
+model novel_world_rule {
+  id             String   @id @default(cuid())
+  novelId        String
+  name           String //规则名
+  rule           String //规则内容
+  status         String //状态
+  startChapterId String? //生效起始章节（novel_chapter.id）
+  endChapterId   String? //生效结束章节（novel_chapter.id）
+  createdAt      DateTime @default(now()) @db.Timestamptz
+  updatedAt      DateTime @updatedAt @db.Timestamptz
+
+  novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
+
+  @@index([novelId])
+}
+
+model novel_timeline {
+  id             String   @id @default(cuid())
+  novelId        String
+  title          String //时间线标题
+  status         String //状态
+  year           String //年份
+  description    String //描述
+  startChapterId String? //涉及起始章节（novel_chapter.id）
+  endChapterId   String? //涉及结束章节（novel_chapter.id）
+  createdAt      DateTime @default(now()) @db.Timestamptz
+  updatedAt      DateTime @updatedAt @db.Timestamptz
+
+  novel novel                @relation(references: [id], fields: [novelId], onDelete: Cascade)
+  refs  novel_timeline_ref[]
+
+  @@index([novelId])
+}
+
+model novel_faction {
+  id          String   @id @default(cuid())
+  novelId     String
+  name        String //名称
+  type        String //类型
+  location    String //所在地
+  description String //描述
+  stance      String //立场
+  createdAt   DateTime @default(now()) @db.Timestamptz
+  updatedAt   DateTime @updatedAt @db.Timestamptz
+
+  novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
+
+  // 同名势力只能有一行：writer 每章都会报「新增势力」，没有这个约束会插出一堆重复行，
+  // 之后 ref 指向哪一行就不确定了，影响分析会给出两个同名实体。
+  @@unique([novelId, name])
+  @@index([novelId])
+}
+
+model novel_chronicle {
+  id        String   @id @default(cuid())
+  novelId   String
+  title     String //事件标题
+  year      String //年份
+  content   String //内容
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  novel novel                 @relation(references: [id], fields: [novelId], onDelete: Cascade)
+  refs  novel_chronicle_ref[]
+
+  @@index([novelId])
+}
+
+model novel_item {
+  id                       String   @id @default(cuid())
+  novelId                  String
+  name                     String //名称
+  type                     String //类型
+  description              String //描述
+  firstAppearanceChapterId String? //首次出现章节（novel_chapter.id）
+  status                   String //状态
+  ownerId                  String? //持有者（人物 id）
+  createdAt                DateTime @default(now()) @db.Timestamptz
+  updatedAt                DateTime @updatedAt @db.Timestamptz
+
+  novel novel            @relation(references: [id], fields: [novelId], onDelete: Cascade)
+  owner novel_character? @relation(references: [id], fields: [ownerId], onDelete: SetNull)
+
+  // 同小说内物品重名没有意义，理由同 novel_faction：防止 writer 反复报「新增物品」插出重复行。
+  @@unique([novelId, name])
+  @@index([novelId, firstAppearanceChapterId])
+  @@index([ownerId])
+}
+
+model novel_relation {
+  id             String   @id @default(cuid())
+  novelId        String
+  fromCharId     String //源角色 id
+  toCharId       String //目标角色 id
+  relationType   String //关系类型
+  strength       Int //关系强度
+  description    String //描述
+  startChapterId String? //起始章节（novel_chapter.id）
+  endChapterId   String? //结束章节（novel_chapter.id）
+  status         String //状态
+  createdAt      DateTime @default(now()) @db.Timestamptz
+  updatedAt      DateTime @updatedAt @db.Timestamptz
+
+  novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
+
+  @@unique([novelId, fromCharId, toCharId, relationType])
+  // 反查「这个角色牵涉了哪些关系」要用 fromCharId，只有 toCharId 那条索引走不到。
+  @@index([novelId, fromCharId])
+  @@index([novelId, toCharId])
+}
+
+// 全书灵感库：跨章节的构思，usedChapterIds 记录用在哪些章
+model novel_inspiration {
+  id             String   @id @default(cuid())
+  novelId        String
+  type           String //灵感类型
+  content        String //灵感内容
+  usedChapterIds String[] //已使用章节（novel_chapter.id 列表）
+  createdAt      DateTime @default(now()) @db.Timestamptz
+  updatedAt      DateTime @updatedAt @db.Timestamptz
+
+  novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
+
+  @@index([novelId])
+}
+
+// 章节灵感库：写某一章时产生的想法，只属于该章
+model novel_chapter_inspiration {
+  id        String   @id @default(cuid())
+  chapterId String
+  type      String //灵感类型
+  content   String //灵感内容
+  status    String //状态
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  chapter novel_chapter @relation(references: [id], fields: [chapterId], onDelete: Cascade)
+
+  @@index([chapterId])
+}
+
+model novel_foreshadowing {
+  id                String   @id @default(cuid())
+  novelId           String
+  description       String //伏笔描述
+  plantedChapterId  String? //埋设章节（novel_chapter.id）
+  resolvedChapterId String? //回收章节（novel_chapter.id）
+  status            String //状态
+  createdAt         DateTime @default(now()) @db.Timestamptz
+  updatedAt         DateTime @updatedAt @db.Timestamptz
+
+  novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
+
+  @@index([novelId, plantedChapterId])
+  @@index([novelId, resolvedChapterId])
+}
+
+// 章节 / 大纲 / 时间线 / 编年史 的关联表：本章 / 本条涉及的人物、势力、时间线、大纲、
+// 编年史、伏笔、物品、灵感、世界规则。refType 决定 refId 指向哪张表；role 是戏份，
+// 九类通用（见 agents/novel/utils/ledger.py 的 ROLE_VALUES）。refId 上没有外键 ——
+// refType 决定它指向哪张表，一个列没法对九张表建约束，所以悬空 id 靠影响检测去报，不靠库拦。
+model novel_chapter_ref {
+  id        String   @id @default(cuid())
+  chapterId String
+  refType   RefType
+  refId     String //目标行 id
+  role      String? //戏份：key 关键 / state 状态 / mention 提及
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  chapter novel_chapter @relation(references: [id], fields: [chapterId], onDelete: Cascade)
+
+  @@unique([chapterId, refType, refId])
+  @@index([refType, refId])
+}
+
+model novel_outline_ref {
+  id        String   @id @default(cuid())
+  outlineId String
+  refType   RefType
+  refId     String //目标行 id
+  role      String? //戏份：key 关键 / state 状态 / mention 提及
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  outline novel_outline @relation(references: [id], fields: [outlineId], onDelete: Cascade)
+
+  @@unique([outlineId, refType, refId])
+  @@index([refType, refId])
+}
+
+model novel_timeline_ref {
+  id         String   @id @default(cuid())
+  timelineId String
+  refType    RefType
+  refId      String //目标行 id
+  role       String? //戏份：key 关键 / state 状态 / mention 提及
+  createdAt  DateTime @default(now()) @db.Timestamptz
+
+  timeline novel_timeline @relation(references: [id], fields: [timelineId], onDelete: Cascade)
+
+  @@unique([timelineId, refType, refId])
+  @@index([refType, refId])
+}
+
+model novel_chronicle_ref {
+  id          String   @id @default(cuid())
+  chronicleId String
+  refType     RefType
+  refId       String //目标行 id
+  role        String? //戏份：key 关键 / state 状态 / mention 提及
+  createdAt   DateTime @default(now()) @db.Timestamptz
+
+  chronicle novel_chronicle @relation(references: [id], fields: [chronicleId], onDelete: Cascade)
+
+  @@unique([chronicleId, refType, refId])
+  @@index([refType, refId])
+}
+
+// 改动影响台账：一次改动牵连到的每一处地方各占一行。
+//
+// 用户能改的地方多（章节 / 角色 / 势力 / 物品 / 大纲 / 时间线 / 世界规则 …），不同的改动波及
+// 的地方又各不相同。这张表不试图穷举「哪种改动影响哪些表」——那种映射是 N×M，永远配不完。
+// 它把每次改动归一成「改了什么 → 波及哪里 → 为什么受影响 → 处理了没有」平铺成行：
+//   - 同样的 changeId 是一组，代表用户这一次的修改需求；
+//   - reason 写清「为什么受影响」，用户逐条看得懂是改名就行还是得重写这一章；
+//   - status 承载「用户不要求修改就先放着」——skipped 的行留在表里，不删。
+// editor 只负责生成行，真正改哪一条由用户逐行确认。
+model novel_change_impact {
+  id            String         @id @default(cuid())
+  novelId       String
+  changeId      String //一次改动一个 id；同一批影响共享，用于分组
+  changeSummary String //这次改动的人话描述，例：把林默的能力改成「看见三秒后的画面」
+  sourceType    ImpactTarget //改动的是哪一类对象
+  sourceId      String //改动对象的 id
+  oldValue      String? //改动前的值（字面替换要用）
+  newValue      String? //改动后的值；纯新增/删除时一端可为空
+  targetType    ImpactTarget //被波及的是哪一类对象
+  targetId      String //被波及对象的 id
+  targetChapter Int? //目标若是章节，这里存落库时的章节号快照，仅供展示排序；
+  //章节重排后它会失真，定位一律以 targetId 为准
+  reasonKind    ImpactReason //受影响原因的分类，便于统计与排序
+  reason        String //受影响原因（人话），直接展示给用户
+  severity      ImpactSeverity @default(review)
+  status        ImpactStatus   @default(pending)
+  resolution    String? //实际怎么处理的，改完回填
+  detectedBy    String         @default("") //哪一层查出来的：ref / name_match / semantic，排查误报用
+  createdAt     DateTime       @default(now()) @db.Timestamptz
+  updatedAt     DateTime       @updatedAt @db.Timestamptz
+
+  novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
+
+  // 同一批改动、同一个对象、同一种原因只留一行：检测可以重复跑，靠 upsert 保持幂等。
+  @@unique([changeId, targetType, targetId, reasonKind])
+  @@index([novelId, status])
+  @@index([novelId, targetType, targetId])
+  @@index([changeId])
+}

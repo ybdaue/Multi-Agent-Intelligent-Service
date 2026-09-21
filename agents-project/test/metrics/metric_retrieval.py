@@ -9,13 +9,13 @@
     MRR        首个命中父块排名的倒数，对"命中但排得靠后"更敏感
     平均时延    四组各自的时延（按组成步骤归因，避免重复调用 rerank 产生额外费用）
 
-数据库安全：本文件只读 Chroma / PG（向量查询 + bm25 表读取 + laws 父表 SELECT），
+数据库安全：本文件只读 Chroma / PG（向量查询 + legal_bm25 表读取 + legal_laws 父表 SELECT），
     不写入任何表，也不调用 delete_expired_chunks。
 
 用法（在 agents-project 目录下，需先起 Chroma:8000、PG，并备好本地 embedding 模型）：
     python test/metrics/metric_retrieval.py
     python test/metrics/metric_retrieval.py --save
-    python test/metrics/metric_retrieval.py --from-corpus 30   # 从 laws 表自动构造精确标注
+    python test/metrics/metric_retrieval.py --from-corpus 30   # 从 legal_laws 表自动构造精确标注
 """
 
 import random
@@ -44,13 +44,13 @@ def build_parser():
         type=int,
         default=0,
         metavar="N",
-        help="从 PG laws 表抽样 N 条构造精确 parent_id 标注（用于校验召回链路对齐）",
+        help="从 PG legal_laws 表抽样 N 条构造精确 parent_id 标注（用于校验召回链路对齐）",
     )
     return p
 
 
 def load_corpus_cases(n: int, seed: int = 42) -> list[dict]:
-    """从 PG laws 父表抽样构造精确标注（expect_parent_ids）。
+    """从 PG legal_laws 父表抽样构造精确标注（expect_parent_ids）。
 
     这是**召回链路对齐检查**，不是语义质量评测：query 取自父文本中段，与目标父块高度重叠，
     四组配置理应接近满分。语义质量请看标注集里带 retrieval_keywords 的那组 case。
@@ -66,7 +66,7 @@ def load_corpus_cases(n: int, seed: int = 42) -> list[dict]:
         ).fetchall()
 
     if not rows:
-        raise SystemExit("laws 表没有可用数据：先跑 python agents/utils/legal_ingest.py 导入法规。")
+        raise SystemExit("legal_laws 表没有可用数据：先跑 python agents/utils/legal_ingest.py 导入法规。")
 
     picks = random.Random(seed).sample(rows, min(n, len(rows)))
     cases = []
@@ -166,7 +166,7 @@ def collect(cases: list[dict], RL, bm25_index, expand_to_parents, retrieve_text)
 def report(cases: list[dict], stats: dict, args, return_k: int) -> None:
     total = len(cases)
     C.header(f"检索召回率（Recall@{return_k}）与四组消融对照")
-    print(f"标注 case 数：{total}   来源：{'laws 表自动构造（链路对齐）' if args.from_corpus else '标注集'}")
+    print(f"标注 case 数：{total}   来源：{'legal_laws 表自动构造（链路对齐）' if args.from_corpus else '标注集'}")
     print()
     print(f"  {'配置':<32}{'Recall@k':>16}{'MRR':>10}{'平均时延':>12}")
     print("  " + "-" * 68)
@@ -227,7 +227,7 @@ def main(args) -> None:
 
     if args.from_corpus:
         cases = load_corpus_cases(args.from_corpus)
-        print(f"从 laws 表自动构造 {len(cases)} 条精确标注 case")
+        print(f"从 legal_laws 表自动构造 {len(cases)} 条精确标注 case")
     else:
         cases = [
             c
@@ -247,7 +247,7 @@ def main(args) -> None:
             "agents-project/models/bge-large-zh-v1.5。否则检索结果全为空，指标没有参考价值。"
         )
     if not bm25_index.init():
-        print("⚠️  BM25 索引未就绪（bm25 表为空或 PG 不可用）：仅 BM25 / RRF / rerank 三组会退化。")
+        print("⚠️  BM25 索引未就绪（legal_bm25 表为空或 PG 不可用）：仅 BM25 / RRF / rerank 三组会退化。")
     else:
         print(f"BM25 索引就绪，共 {len(bm25_index._docs)} 条")
 

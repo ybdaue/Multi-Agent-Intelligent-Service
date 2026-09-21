@@ -1,13 +1,22 @@
 """Postgres 版 LangGraph checkpoint saver，落库到 my-app 的 checkpoint 表。
 
-每个实例绑定一个 agent 名（构造时传入）。行级定位三要素：
-  - userId   从 config["configurable"]["userId"] 取（缺省 "0"）
-  - agentName 构造时绑定
-  - threadId  从 config["configurable"]["thread_id"] 取
+每个实例绑定一个 agent 名（构造时传入）。行级定位四要素：
+  - userId       从 config["configurable"]["userId"] 取（缺省 "0"）
+  - agentName    构造时绑定
+  - threadId     从 config["configurable"]["thread_id"] 取
+  - checkpointNs 从 config["configurable"]["checkpoint_ns"] 取（缺省 ""，即根图层）
 每次 agent 推进产出的 checkpoint 作为一行“追加式快照”写入
-(userId, agentName, threadId, checkpointId) 唯一，历史可回溯。
-每个 (userId, agentName, threadId) 对话只保留最近 MAX_SNAPSHOTS 个快照，
-写入超出上限时同事务内删除最旧的（见 aput/put 末尾的裁剪）。
+(userId, agentName, threadId, checkpointNs, checkpointId) 唯一，历史可回溯。
+
+**checkpoint_ns 必须参与定位**：挂进图里当节点的子图会带自己那段命名空间（形如
+writer:<task_id>|write:<task_id>），父图是空串。同一个 thread 下两边各写各的快照，
+少读了 ns 就会把子图的 state 当成父图的拿回来（表现为 "Ignoring unknown node name ... in
+pending sends"、'checkpoint_ns' KeyError 这类怪事）。返回给 langgraph 的 config 也必须把 ns
+带上，langgraph 会拿它去拼 checkpoint_map。
+
+裁剪：一个 thread 下保留最近 MAX_SNAPSHOTS 个**根图层**快照及其之后的全部行。之所以按根层
+快照划线，是因为一轮 resuming 只会从最新的根层快照出发，它下面挂着的子图快照（写得更晚、
+id 更大）才是这条路要用到的；更早的子图快照连同更早的根层快照一起删掉不会丢东西。
 
 用法（替换 compile(checkpointer=...) 里的 BoundedMemorySaver）：
 
@@ -20,7 +29,7 @@
     invoke 用本机短连接兜底（同一 DSN）。首选异步调用。
   - 序列化复用 langgraph 默认 JsonPlusSerializer（msgpack），以 base64 塞进 jsonb 列，
     保证 messages 等对象读回后仍是 BaseMessage 类型。
-  - 该实现暂不感知 checkpoint_ns / DeltaChannel，超时/中断语义以最新快照为主。
+  - DeltaChannel 不感知，超时/中断语义以最新快照为主。
 """
 
 from __future__ import annotations
@@ -43,17 +52,25 @@ from langgraph.checkpoint.base import (
 
 logger = logging.getLogger(__name__)
 
-# 单个对话 (userId, agentName, threadId) 最多保留的快照数，超出删最旧
-MAX_SNAPSHOTS = 20
+# 单个对话 (userId, agentName, threadId) 最多保留多少个**根图层**快照。
+# 每份快照都是整份 state，窗口大小直接乘在存储上；而旧快照只服务于时间回溯/中途恢复，
+# 本项目的读取路径不带 checkpoint_id、永远只取最新一份，所以窗口开小即可。
+# 子图快照不受这个数限制：它们比划线的那个根层快照新，会一并留下（见下面的 SQL）。
+MAX_SNAPSHOTS = 5
 
+# 划一条线：第 MAX_SNAPSHOTS 新的根层快照的 checkpointId。比它旧的整行删掉 —— 既包括更早的
+# 根层快照，也包括挂在那几轮下面的子图快照。子图快照的 id 比它那一轮的根层快照更大（父图先
+# 存、子图后存），所以当前这轮的整条链一定在线之上。根层快照还不够 MAX_SNAPSHOTS 个时子查询
+# 是 NULL，兜成空串后 `checkpointId < ''` 恒假，一行都不删。
 _PRUNE_SQL = (
     'DELETE FROM checkpoint '
     'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s '
-    'AND "checkpointId" NOT IN ('
+    'AND "checkpointId" < COALESCE(('
     '  SELECT "checkpointId" FROM checkpoint '
     '  WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s '
-    '  ORDER BY "checkpointId" DESC LIMIT %s'
-    ')'
+    '  AND "checkpointNs" = \'\' '
+    '  ORDER BY "checkpointId" DESC OFFSET %s LIMIT 1'
+    '), \'\')'
 )
 
 
@@ -67,6 +84,11 @@ def _anon_user(config: RunnableConfig) -> str:
 
 def _thread_id(config: RunnableConfig) -> str:
     return config["configurable"]["thread_id"]
+
+
+def _checkpoint_ns(config: RunnableConfig) -> str:
+    """这一段是哪个图的快照。根图层没有这个键（或为空串），挂进图里的子图会带上自己那段。"""
+    return config["configurable"].get("checkpoint_ns") or ""
 
 
 def create_checkpoint(agent_name: str) -> "PostgresCheckpointSaver":
@@ -93,9 +115,18 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
         return self._pack({"metadata": dict(metadata or {}), "pending": pending})
 
     @staticmethod
-    def _ret_config(thread_id: str, checkpoint_id: str) -> RunnableConfig:
-        # 仅回填定位键；userId 等运行时键始终由调用方 config 携带
-        return {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
+    def _ret_config(
+        thread_id: str, checkpoint_ns: str, checkpoint_id: str
+    ) -> RunnableConfig:
+        # 仅回填定位键；userId 等运行时键始终由调用方 config 携带。
+        # checkpoint_ns 一定要带上：langgraph 收尾时会拿它拼 checkpoint_map（不带就是 KeyError）。
+        return {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_id": checkpoint_id,
+            }
+        }
 
     # ---- async: 主路径，走 api.db.pg_pool ----
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
@@ -103,16 +134,18 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
 
         uid = _anon_user(config)
         tid = _thread_id(config)
+        ns = _checkpoint_ns(config)
         cp_id = config["configurable"].get("checkpoint_id")
 
-        params: list = [uid, self.agent_name, tid]
+        params: list = [uid, self.agent_name, tid, ns]
         if cp_id:
             params.append(cp_id)
 
         async with pg_pool.connection() as conn:
             cur = await conn.execute(
                 'SELECT "checkpointId", state, metadata FROM checkpoint '
-                'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s'
+                'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s '
+                'AND "checkpointNs" = %s'
                 + (" AND \"checkpointId\" = %s" if cp_id else "")
                 + ' ORDER BY "checkpointId" DESC LIMIT 1',
                 params,
@@ -132,7 +165,7 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
                 for e in payload["pending"]
             ]
         return CheckpointTuple(
-            config=self._ret_config(tid, cp_id),
+            config=self._ret_config(tid, ns, cp_id),
             checkpoint=checkpoint,
             metadata=metadata,
             parent_config=None,
@@ -150,6 +183,7 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
 
         uid = _anon_user(config)
         tid = _thread_id(config)
+        ns = _checkpoint_ns(config)
         cp_id = checkpoint["id"]
         state_blob = json.dumps(self._pack(checkpoint), ensure_ascii=False)
         meta_blob = json.dumps(self._meta_blob(metadata, []), ensure_ascii=False)
@@ -157,19 +191,20 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
         async with pg_pool.connection() as conn:
             await conn.execute(
                 'INSERT INTO checkpoint (id, "userId", "agentName", "threadId", '
-                '"checkpointId", state, metadata, "createdAt", "updatedAt") '
-                "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now(), now()) "
-                'ON CONFLICT ("userId", "agentName", "threadId", "checkpointId") '
+                '"checkpointNs", "checkpointId", state, metadata, "createdAt", "updatedAt") '
+                "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now(), now()) "
+                'ON CONFLICT ("userId", "agentName", "threadId", "checkpointNs", "checkpointId") '
                 "DO UPDATE SET state = EXCLUDED.state, metadata = EXCLUDED.metadata, "
                 '"updatedAt" = now()',
-                [uuid.uuid4().hex, uid, self.agent_name, tid, cp_id, state_blob, meta_blob],
+                [uuid.uuid4().hex, uid, self.agent_name, tid, ns, cp_id, state_blob, meta_blob],
             )
             await conn.execute(
                 _PRUNE_SQL,
-                [uid, self.agent_name, tid, uid, self.agent_name, tid, MAX_SNAPSHOTS],
+                [uid, self.agent_name, tid,
+                 uid, self.agent_name, tid, MAX_SNAPSHOTS - 1],
             )
             await conn.commit()
-        return self._ret_config(tid, cp_id)
+        return self._ret_config(tid, ns, cp_id)
 
     async def aput_writes(
         self,
@@ -182,12 +217,14 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
 
         uid = _anon_user(config)
         tid = _thread_id(config)
+        ns = _checkpoint_ns(config)
         cp_id = config["configurable"]["checkpoint_id"]
 
         async with pg_pool.connection() as conn:
             cur = await conn.execute(
-                'SELECT metadata FROM checkpoint WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s AND "checkpointId" = %s',
-                [uid, self.agent_name, tid, cp_id],
+                'SELECT metadata FROM checkpoint WHERE "userId" = %s AND "agentName" = %s '
+                'AND "threadId" = %s AND "checkpointNs" = %s AND "checkpointId" = %s',
+                [uid, self.agent_name, tid, ns, cp_id],
             )
             row = await cur.fetchone()
             if row is None:
@@ -210,8 +247,9 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
             new_blob = json.dumps(self._meta_blob(payload.get("metadata") or {}, pending), ensure_ascii=False)
             await conn.execute(
                 'UPDATE checkpoint SET metadata = %s::jsonb, "updatedAt" = now() '
-                'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s AND "checkpointId" = %s',
-                [new_blob, uid, self.agent_name, tid, cp_id],
+                'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s '
+                'AND "checkpointNs" = %s AND "checkpointId" = %s',
+                [new_blob, uid, self.agent_name, tid, ns, cp_id],
             )
             await conn.commit()
 
@@ -229,13 +267,14 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
             raise NotImplementedError("PostgresCheckpointSaver 不支持全库 list，请传入带 userId/thread_id 的 config")
         uid = _anon_user(config)
         tid = _thread_id(config)
+        ns = _checkpoint_ns(config)
 
         async with pg_pool.connection() as conn:
             cur = await conn.execute(
                 'SELECT "checkpointId", state, metadata FROM checkpoint '
                 'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s '
-                'ORDER BY "checkpointId" DESC',
-                [uid, self.agent_name, tid],
+                'AND "checkpointNs" = %s ORDER BY "checkpointId" DESC',
+                [uid, self.agent_name, tid, ns],
             )
             rows = await cur.fetchall()
 
@@ -258,7 +297,7 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
                 continue
             checkpoint = self._unpack(row[1])
             yield CheckpointTuple(
-                config=self._ret_config(tid, cp_id),
+                config=self._ret_config(tid, ns, cp_id),
                 checkpoint=checkpoint,
                 metadata=metadata,
                 parent_config=None,
@@ -282,6 +321,7 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
         row = rows[0]
         uid = _anon_user(config)
         tid = _thread_id(config)
+        ns = _checkpoint_ns(config)
         cp_id = row[0]
         checkpoint = self._unpack(row[1])
         payload = self._unpack(row[2])
@@ -293,7 +333,7 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
                 for e in payload["pending"]
             ]
         return CheckpointTuple(
-            config=self._ret_config(tid, cp_id),
+            config=self._ret_config(tid, ns, cp_id),
             checkpoint=checkpoint,
             metadata=metadata,
             parent_config=None,
@@ -313,25 +353,27 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
 
         uid = _anon_user(config)
         tid = _thread_id(config)
+        ns = _checkpoint_ns(config)
         cp_id = checkpoint["id"]
         state_blob = json.dumps(self._pack(checkpoint), ensure_ascii=False)
         meta_blob = json.dumps(self._meta_blob(metadata, []), ensure_ascii=False)
         with psycopg.connect(postgreSQL_URL) as conn:
             conn.execute(
                 'INSERT INTO checkpoint (id, "userId", "agentName", "threadId", '
-                '"checkpointId", state, metadata, "createdAt", "updatedAt") '
-                "VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now(), now()) "
-                'ON CONFLICT ("userId", "agentName", "threadId", "checkpointId") '
+                '"checkpointNs", "checkpointId", state, metadata, "createdAt", "updatedAt") '
+                "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now(), now()) "
+                'ON CONFLICT ("userId", "agentName", "threadId", "checkpointNs", "checkpointId") '
                 "DO UPDATE SET state = EXCLUDED.state, metadata = EXCLUDED.metadata, "
                 '"updatedAt" = now()',
-                [uuid.uuid4().hex, uid, self.agent_name, tid, cp_id, state_blob, meta_blob],
+                [uuid.uuid4().hex, uid, self.agent_name, tid, ns, cp_id, state_blob, meta_blob],
             )
             conn.execute(
                 _PRUNE_SQL,
-                [uid, self.agent_name, tid, uid, self.agent_name, tid, MAX_SNAPSHOTS],
+                [uid, self.agent_name, tid,
+                 uid, self.agent_name, tid, MAX_SNAPSHOTS - 1],
             )
             conn.commit()
-        return self._ret_config(tid, cp_id)
+        return self._ret_config(tid, ns, cp_id)
 
     def put_writes(
         self,
@@ -346,11 +388,13 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
 
         uid = _anon_user(config)
         tid = _thread_id(config)
+        ns = _checkpoint_ns(config)
         cp_id = config["configurable"]["checkpoint_id"]
         with psycopg.connect(postgreSQL_URL) as conn:
             row = conn.execute(
-                'SELECT metadata FROM checkpoint WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s AND "checkpointId" = %s',
-                [uid, self.agent_name, tid, cp_id],
+                'SELECT metadata FROM checkpoint WHERE "userId" = %s AND "agentName" = %s '
+                'AND "threadId" = %s AND "checkpointNs" = %s AND "checkpointId" = %s',
+                [uid, self.agent_name, tid, ns, cp_id],
             ).fetchone()
             if row is None:
                 return
@@ -372,8 +416,9 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
             new_blob = json.dumps(self._meta_blob(payload.get("metadata") or {}, pending), ensure_ascii=False)
             conn.execute(
                 'UPDATE checkpoint SET metadata = %s::jsonb, "updatedAt" = now() '
-                'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s AND "checkpointId" = %s',
-                [new_blob, uid, self.agent_name, tid, cp_id],
+                'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s '
+                'AND "checkpointNs" = %s AND "checkpointId" = %s',
+                [new_blob, uid, self.agent_name, tid, ns, cp_id],
             )
             conn.commit()
 
@@ -384,14 +429,16 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
 
         uid = _anon_user(config)
         tid = _thread_id(config)
+        ns = _checkpoint_ns(config)
         cp_id = config["configurable"].get("checkpoint_id")
-        params: list = [uid, self.agent_name, tid]
+        params: list = [uid, self.agent_name, tid, ns]
         if cp_id:
             params.append(cp_id)
         with psycopg.connect(postgreSQL_URL) as conn:
             cur = conn.execute(
                 'SELECT "checkpointId", state, metadata FROM checkpoint '
-                'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s'
+                'WHERE "userId" = %s AND "agentName" = %s AND "threadId" = %s '
+                'AND "checkpointNs" = %s'
                 + (' AND "checkpointId" = %s' if cp_id else "")
                 + ' ORDER BY "checkpointId" DESC LIMIT 1',
                 params,

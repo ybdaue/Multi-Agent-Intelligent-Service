@@ -8,7 +8,7 @@
 
 ⚠️ 边界说清楚（面试会被追问）：
     这里记的是**完整往返时延**，不是首 token 时延（TTFT）。调度节点走的是非流式
-    _invoke_assistant_model，流式只出现在闲聊轮与最终答复。要报 TTFT 需要另加流式探针，
+    invoke_assistant_model，流式只出现在闲聊轮与最终答复。要报 TTFT 需要另加流式探针，
     本脚本不覆盖。
 
 用法（在 agents-project 目录下）：
