@@ -65,8 +65,17 @@ interface WorkAreaProps {
   stage: string;
   /** 这一章的对话面板整个封掉：本轮还没跑完，或本轮在别的章上跑 */
   chatDisabled: boolean;
+  /** 这一轮的流还开着（能掐断） */
+  running: boolean;
+  /** 掐断这一轮生成 */
+  onStop: () => void;
   /** 图在等用户答复（收下这一稿 / 说往哪儿改） */
   pendingQuestion: boolean;
+  /** 停在确认上时后端给的出口按钮（收下 / 按库里改） */
+  answerOptions: { id: string; label: string }[];
+  onAnswer: (option: { id: string; label: string }) => void;
+  /** 清空这本的对话记录（后端那份一起清，刷新后不会回来） */
+  onClear: () => void;
   /** 本轮正在生成的那一章，写在正文区标题栏右边；null = 没有在跑的 */
   runChapter: RunChapter | null;
 }
@@ -83,7 +92,12 @@ export default function WorkArea({
   draft,
   stage,
   chatDisabled,
+  running,
+  onStop,
   pendingQuestion,
+  answerOptions,
+  onAnswer,
+  onClear,
   runChapter,
 }: WorkAreaProps) {
   const activeTab = WORK_TABS.find((t) => t.key === tab) ?? WORK_TABS[0];
@@ -117,7 +131,12 @@ export default function WorkArea({
               draft={draft}
               stage={stage}
               chatDisabled={chatDisabled}
+              running={running}
+              onStop={onStop}
               pendingQuestion={pendingQuestion}
+              answerOptions={answerOptions}
+              onAnswer={onAnswer}
+              onClear={onClear}
               runChapter={runChapter}
             />
           ) : (

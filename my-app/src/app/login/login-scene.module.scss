@@ -1,0 +1,19 @@
+.scene {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  opacity: 0;
+  animation: sceneFadeIn 0.7s ease 0.2s forwards;
+  will-change: transform;
+
+  canvas {
+    display: block;
+  }
+}
+
+@keyframes sceneFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}

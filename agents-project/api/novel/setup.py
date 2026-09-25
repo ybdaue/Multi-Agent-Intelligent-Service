@@ -36,6 +36,22 @@ _SSE_HEADERS = {
 }
 
 
+async def _has_paused(user_id: str, novel_id: str) -> bool:
+    """这本开书是否正停在 interrupt 上等答复。"""
+    from langgraph.checkpoint.base import BaseCheckpointException
+
+    try:
+        snapshot = await novel_setup_agent.aget_state(_config(user_id, novel_id))
+    except BaseCheckpointException:
+        return False
+    if snapshot is None:
+        return False
+    for task in getattr(snapshot, "tasks", None) or ():
+        if getattr(task, "interrupts", None):
+            return True
+    return False
+
+
 def _event(name: str, payload: dict) -> str:
     return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -164,6 +180,8 @@ async def run_setup(
         raise HTTPException(status_code=400, detail="至少说一句想写什么")
 
     user_id = str(request.state.user_id)
+    if await _has_paused(user_id, novelId):
+        raise HTTPException(status_code=409, detail="上一轮还没答完，请先回答当前问题")
     return _sse(
         user_id=user_id,
         novel_id=novelId,
@@ -181,8 +199,11 @@ async def resume_setup(
     if not answer.strip():
         raise HTTPException(status_code=400, detail="答复不能是空的")
 
+    user_id = str(request.state.user_id)
+    if not await _has_paused(user_id, novelId):
+        raise HTTPException(status_code=400, detail="没有待恢复的对话")
     return _sse(
-        user_id=str(request.state.user_id),
+        user_id=user_id,
         novel_id=novelId,
         graph_input=Command(resume=answer),
     )

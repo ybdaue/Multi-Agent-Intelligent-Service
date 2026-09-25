@@ -20,3 +20,35 @@
   font-size: 0.8125rem;
   white-space: nowrap;
 }
+
+/* 正文版本冲突：本地这一笔没保存，等用户自己按"载入最新正文"（同 notice，浮着不挤压三栏） */
+.conflict {
+  position: absolute;
+  top: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 21;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.25rem 0.375rem 0.25rem 0.875rem;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 999px;
+  background: var(--color-surface);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  font-size: 0.8125rem;
+  color: #ef4444;
+  white-space: nowrap;
+}
+
+.conflictAction {
+  padding: 0.125rem 0.625rem;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 999px;
+  background: transparent;
+  font-size: 0.75rem;
+  color: #ef4444;
+  cursor: pointer;
+
+  &:hover { background: rgba(239, 68, 68, 0.08); }
+}

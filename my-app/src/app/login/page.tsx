@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { signin } from "@/lib/server/login";
 import { getSession } from "@/lib/auth-clients";
+import ThemeToggle from "@/components/theme-toggle";
 import styles from "./index.module.scss";
+
+const LoginScene = dynamic(() => import("./login-scene"), { ssr: false });
 
 const features = [
   {
@@ -49,6 +52,7 @@ export default function Login() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const cardRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     getSession().then(({ data }) => {
@@ -65,6 +69,7 @@ export default function Login() {
       const res = await signin({ email, password });
       if (!res.success) {
         setError(res.error);
+        setLoading(false);
         return;
       }
       router.replace("/home");
@@ -86,8 +91,10 @@ export default function Login() {
         <div className={styles.shape3} />
         <div className={styles.shape4} />
       </div>
+      <LoginScene anchorRef={cardRef} />
       <div className={styles.wrapper}>
-        <div className={styles.card}>
+        <div className={styles.card} ref={cardRef}>
+          <ThemeToggle variant="icon" className={styles.themeTogglePosition} />
           <div className={styles.logoSection}>
             <div className={styles.logo}>
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -104,7 +111,6 @@ export default function Login() {
 
           <form onSubmit={handleSubmit} className={styles.form}>
             <div className={styles.field}>
-              <label className={styles.label}>邮箱</label>
               <div className={styles.inputWrapper}>
                 <span className={styles.inputIcon}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -120,7 +126,6 @@ export default function Login() {
               </div>
             </div>
             <div className={styles.field}>
-              <label className={styles.label}>密码</label>
               <div className={styles.inputWrapper}>
                 <span className={styles.inputIcon}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -140,7 +145,7 @@ export default function Login() {
               <span className={styles.forgotNote}>忘记密码？请联系管理员重置</span>
             </div>
 
-            {error && <p className={styles.error}>{error}</p>}
+            {error && <p key={error} className={styles.error}>{error}</p>}
 
             <button type="submit" disabled={loading} className={styles.button}>
               {loading ? (
@@ -166,16 +171,27 @@ export default function Login() {
         </div>
       </div>
 
-      <div className={styles.footer}>
-        <div>
-          &copy; {new Date().getFullYear()} AI 智能平台 &mdash; All rights reserved
+          {/* 装饰粒子 */}
+        <div className={styles.decorLeft}>
+          <div className={styles.decorDot1} />
+          <div className={styles.decorDot2} />
+          <div className={styles.decorDot3} />
+          <div className={styles.decorDot4} />
+          <div className={styles.decorDot5} />
+          <div className={styles.decorDot6} />
+          <div className={styles.decorDot7} />
+          <div className={styles.decorDot8} />
+          <div className={styles.decorRing1} />
+          <div className={styles.decorRing2} />
         </div>
-        <div className={styles.legal}>
-          <Link href="/terms">用户协议</Link>
-          <span className={styles.legalSep}>&middot;</span>
-          <Link href="/privacy">隐私政策</Link>
+        <div className={styles.decorTop}>
+          <div className={styles.decorTopDot1} />
+          <div className={styles.decorTopDot2} />
+          <div className={styles.decorTopDot3} />
+          <div className={styles.decorTopDot4} />
+          <div className={styles.decorTopDot5} />
         </div>
+        <div className={styles.exitOverlay} />
       </div>
-    </div>
   );
 }

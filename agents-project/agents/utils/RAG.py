@@ -48,7 +48,7 @@ def init() -> None:
     try:
         # 连 Docker 里的 Chroma
         _client = chromadb.HttpClient(
-            host="localhost",   # Docker 在宿主机跑：localhost
+            host=os.getenv("CHROMA_SERVER_HOST", "localhost"),   # Docker 内由环境变量覆盖
             port=8000,
             settings=Settings(anonymized_telemetry=False),
         )

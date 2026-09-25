@@ -539,12 +539,15 @@ def render_change(summary: str, notes: list[str], rows: list[dict]) -> str:
 
 
 # 影响行靠 (changeId, targetType, targetId, reasonKind) 唯一，重复跑不会翻倍。
+# status 与 resolution（这两样是"这一处怎么处理的"）由调用方给：reader 那条路是用户当场点了
+# 「保留」才记下的，落库就该是 skipped 加一句处理说明，不是待处理。所以 DO UPDATE 里**这两列
+# 都不碰** —— 重跑一遍不能把用户已经处理过的结果抹回去。
 IMPACT_INSERT = (
     'INSERT INTO novel_change_impact (id, "novelId", "changeId", "changeSummary", "sourceType", '
     '"sourceId", "oldValue", "newValue", "targetType", "targetId", "targetChapter", "reasonKind", '
-    '"reason", severity, status, "detectedBy", "createdAt", "updatedAt") '
+    '"reason", severity, status, resolution, "detectedBy", "createdAt", "updatedAt") '
     'VALUES (%s, %s, %s, %s, %s::"ImpactTarget", %s, %s, %s, %s::"ImpactTarget", %s, %s, '
-    '%s::"ImpactReason", %s, %s::"ImpactSeverity", \'pending\'::"ImpactStatus", %s, now(), now()) '
+    '%s::"ImpactReason", %s, %s::"ImpactSeverity", %s::"ImpactStatus", %s, %s, now(), now()) '
     'ON CONFLICT ("changeId", "targetType", "targetId", "reasonKind") DO UPDATE SET '
     '"changeSummary" = EXCLUDED."changeSummary", "oldValue" = EXCLUDED."oldValue", '
     '"newValue" = EXCLUDED."newValue", "targetChapter" = EXCLUDED."targetChapter", '
@@ -643,6 +646,11 @@ async def write_edits(novel_id: str, setting_changes: list[dict], impact_rows: l
                         row["reasonKind"],
                         row["reason"],
                         row["severity"],
+                        # 不给状态的就是还没处理过的新行（pending）；reader 记的偏离是用户
+                        # 当场点了「保留」的，给 skipped —— 已经定过"不改"了。
+                        row.get("status") or "pending",
+                        # 处理说明（前端显示成"处理：…"）。不给就是还没处理，留空。
+                        row.get("resolution") or None,
                         row["detectedBy"],
                     ),
                 )

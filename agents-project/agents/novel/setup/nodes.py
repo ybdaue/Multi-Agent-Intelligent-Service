@@ -33,6 +33,16 @@ from .state import SetupState
 _setupModel = MainModel(temperature=0.6)
 
 
+def _last_human_message(messages) -> str:
+    """从对话历史里找最后一条用户消息（纯文本），用在 _brief 里补上用户反馈。"""
+    for message in reversed(messages or []):
+        if isinstance(message, HumanMessage):
+            content = getattr(message, "content", "")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return ""
+
+
 def _brief(state: SetupState, pending: str) -> str:
     """这一轮给模型的交代：六项定到哪儿了、用户刚说了什么、这一轮该干什么。
 
@@ -53,22 +63,49 @@ def _brief(state: SetupState, pending: str) -> str:
     lines.append("【已经定下的】\n" + ("\n".join(settled) if settled else "（一项都还没定）"))
     lines.append("【还差的】" + ("、".join(missing) if missing else "（没有了）"))
 
+    # 用户这一轮的原话：pending 可能是空的（从 confirm 回炉），此时从对话历史里捞最后一句。
+    said = pending
+    if not said:
+        said = _last_human_message(state.get("messages") or [])
+    if said:
+        lines.append(f"用户刚说的是：\n\n{said}")
+    else:
+        lines.append("等着用户开口。")
+
     if missing:
         lines.append(
             "【这一轮】接住用户刚说的那句，再往下问；他改口了就按他最新的说法重拟 —— "
-            "改了已经定过的那一项，把那一项**整个**重新附一遍标记块（不止一条的那几项，"
-            "每一条都要列出来）。这一轮定下哪几项就附哪几项，还没定的一项都不附。"
+            "改了已经定过的那一项，把那一项**整个**重新附一遍标记块"
+            "（不止一条的那几项——主角、世界规则——每一条都要列出来，"
+            "一条都不能少，否则没列出的那条会被丢掉）。"
+            "这一轮定下哪几项就附哪几项，还没定的一项都不附。"
         )
     else:
-        lines.append(
-            "【这一轮】六项都定过了，用户是在对整份设定提意见：只改他点到的项，"
-            "其余一项都不动，改完把动过的那几项重新附一遍标记块。"
+        has_list = any(
+            isinstance(settings.get(f), list) for f in ("novel_protagonists", "novel_world_rules")
         )
+        if has_list:
+            lines.append(
+                "【这一轮】六项都定过了，用户是在对整份设定提意见：只改他点到的项，"
+                "其余一项都不动，改完把动过的那几项重新附一遍标记块。\n\n"
+                "【重要】**绝对不要问新的问题，绝对不要重复问已经定下的项** —— "
+                "用户不是在回答新问题，而是在对已定好的内容提修改意见。\n\n"
+                "【重要】**主角和世界规则若有点到，必须把该条目的全部内容重新输出一遍**"
+                "—— 例如主角原来有两人（苏晚、李四），用户只说改苏晚的性格，你也必须"
+                "把李四原样抄回去，一条都不能少。整项替换机制会丢掉你没列出的条目。\n\n"
+                "你看他说的那句是什么、改到对应的项上就行，别的事一概不要管。"
+                "只输出他提到的那一项的标记块（多条目那两项必须全列），没提到的项一句都不要提。"
+            )
+        else:
+            lines.append(
+                "【这一轮】六项都定过了，用户是在对整份设定提意见：只改他点到的项，"
+                "其余一项都不动，改完把动过的那几项重新附一遍标记块。\n\n"
+                "【重要】**绝对不要问新的问题，绝对不要重复问已经定下的项** —— "
+                "用户不是在回答新问题，而是在对已定好的内容提修改意见。"
+                "你看他说的那句是什么、改到对应的项上就行，别的事一概不要管。"
+                "只输出他提到的那一项的标记块，没提到的项一句都不要提。"
+            )
 
-    if pending:
-        lines.append(f"用户刚说的是：\n\n{pending}")
-    else:
-        lines.append("用户刚说的是他在上面那条消息里提的意见。")
     return "\n\n".join(lines)
 
 
@@ -146,15 +183,15 @@ async def confirm(state: SetupState, config: RunnableConfig) -> Command:
 
     if approved:
         return Command(goto="save", update={"approved": True})
-    # 没认可：把这份清单与用户的意见一并留在 history 里再回炉 —— 模型看得见用户是在对着
-    # 什么提意见。用户的原话已经由这里追加过了，所以 user_message 留空，别在 collect 里再来一遍。
+    # 没认可：只把用户的意见留在 history 里，不把整份 confirm 清单（已经很长了）加进去挤占上下文。
+    # _brief 会在下一轮 collect 中通过 _last_human_message 从历史里找到这句反馈。
     return Command(
         goto="collect",
         update={
             "approved": False,
             "question": "",
             "user_message": "",
-            "messages": [AIMessage(content=text), HumanMessage(content=str(answer))],
+            "messages": [HumanMessage(content=str(answer))],
         },
     )
 

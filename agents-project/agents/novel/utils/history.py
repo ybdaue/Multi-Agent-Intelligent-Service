@@ -28,16 +28,48 @@ def _cut_at_user(messages, limit: int) -> list:
     return []
 
 
+ROLE_LABEL = {"user": "用户", "assistant": "助手"}
+
+
+def visible_messages(messages) -> list[tuple[str, str]]:
+    """messages 里"用户 / 助手说过的话"那几条，按 (角色, 内容) 给；工具调用的中间态不算。
+
+    喂给模型的历史与前端重建出来的对话栏共用这一份口径（见 api/novel/agent.py 的 /history）：
+    两边不一致的话，用户看到的对话跟他以为 agent 记得的就不是一回事了。
+    """
+    pairs: list[tuple[str, str]] = []
+    for message in messages or ():
+        content = getattr(message, "content", "")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        if isinstance(message, HumanMessage):
+            pairs.append(("user", content))
+        elif isinstance(message, AIMessage) and not getattr(message, "tool_calls", None):
+            pairs.append(("assistant", content))
+    return pairs
+
+
+def last_reply(messages) -> str:
+    """末尾那条助手回话；末尾不是助手说的话就给空串。
+
+    用来认出"这一轮的助手回话"：用户在确认环节问了一句、由 chat 答完之后，这一轮停在同一个
+    interrupt 上重新摆问题（见 nodes/confirm_chapter）—— 那句话只活在 messages 末尾，前端要
+    靠它把"我的问题 → 助手的答复 → 重摆的那一问"摆全（见 api/novel/agent.py 的 question 事件）。
+
+    判据是"末尾"而不是"最后一条助手消息"：写作 / 审稿那几段子图的对话不上交父图，正常停在
+    interrupt 上时末尾是 intension 写进去的用户那句话，这儿给空串；换成往上翻着找，就会把
+    上一轮的回话当成本轮的推给前端。
+    """
+    pairs = visible_messages(messages)
+    if pairs and pairs[-1][0] == "assistant":
+        return pairs[-1][1].strip()
+    return ""
+
+
 def _line(message) -> str:
     """一条消息渲染成一行；不是给用户看的话（工具调用中间态）给空串。"""
-    if isinstance(message, HumanMessage) and message.content:
-        return f"用户：{message.content}"
-    if (
-        isinstance(message, AIMessage)
-        and not getattr(message, "tool_calls", None)
-        and message.content
-    ):
-        return f"助手：{message.content}"
+    for role, content in visible_messages([message]):
+        return f"{ROLE_LABEL[role]}：{content}"
     return ""
 
 

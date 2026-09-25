@@ -14,14 +14,16 @@
 from langgraph.graph import END, START, StateGraph
 
 from ...utils.checkpoint import create_checkpoint
+from ..utils.trace import traced
 from .nodes import collect, confirm, route_after_collect, route_start, save, wait
 from .state import SetupInput, SetupState
 
+# 进出一行人话打印（agents/novel/utils/trace.py），只管调式，不动流程。
 _setup_flow = StateGraph(SetupState, input_schema=SetupInput)
-_setup_flow.add_node("collect", collect)
-_setup_flow.add_node("wait", wait)
-_setup_flow.add_node("confirm", confirm)
-_setup_flow.add_node("save", save)
+_setup_flow.add_node("collect", traced("setup.collect")(collect))
+_setup_flow.add_node("wait", traced("setup.wait")(wait))
+_setup_flow.add_node("confirm", traced("setup.confirm")(confirm))
+_setup_flow.add_node("save", traced("setup.save")(save))
 
 _setup_flow.add_conditional_edges(START, route_start, {"collect": "collect", "done": END})
 _setup_flow.add_conditional_edges(

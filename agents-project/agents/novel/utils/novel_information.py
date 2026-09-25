@@ -175,26 +175,39 @@ async def save_novel_meta(novel_id: str, user_id: str, novel: dict) -> None:
                     ),
                 )
 
-            for order, outline in enumerate(novel.get("novel_outlines") or []):
-                await conn.execute(
-                    OUTLINE_INSERT,
-                    (
-                        uuid.uuid4().hex,
-                        novel_id,
-                        SETTING_STATUS,
-                        order,
-                        outline.get("content") or "",
-                    ),
-                )
+            # 事务内预检查：大纲和世界规则表没有 UNIQUE 约束，重跑会插出重复行。
+            # 放在同一笔事务里，与后续 INSERT 读到的是一致的。
+            cur = await conn.execute(
+                'SELECT 1 FROM novel_outline WHERE "novelId" = %s LIMIT 1', (novel_id,)
+            )
+            has_outlines = await cur.fetchone() is not None
+            cur = await conn.execute(
+                'SELECT 1 FROM novel_world_rule WHERE "novelId" = %s LIMIT 1', (novel_id,)
+            )
+            has_rules = await cur.fetchone() is not None
 
-            for world_rule in novel.get("novel_world_rules") or []:
-                await conn.execute(
-                    WORLD_RULE_INSERT,
-                    (
-                        uuid.uuid4().hex,
-                        novel_id,
-                        world_rule.get("name") or "",
-                        world_rule.get("rule") or "",
-                        SETTING_STATUS,
-                    ),
-                )
+            if not has_outlines:
+                for order, outline in enumerate(novel.get("novel_outlines") or []):
+                    await conn.execute(
+                        OUTLINE_INSERT,
+                        (
+                            uuid.uuid4().hex,
+                            novel_id,
+                            SETTING_STATUS,
+                            order,
+                            outline.get("content") or "",
+                        ),
+                    )
+
+            if not has_rules:
+                for world_rule in novel.get("novel_world_rules") or []:
+                    await conn.execute(
+                        WORLD_RULE_INSERT,
+                        (
+                            uuid.uuid4().hex,
+                            novel_id,
+                            world_rule.get("name") or "",
+                            world_rule.get("rule") or "",
+                            SETTING_STATUS,
+                        ),
+                    )

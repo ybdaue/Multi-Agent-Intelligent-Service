@@ -4,6 +4,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { services } from "@/lib/server/home/services-data";
 import ServicesGrid from "./components/ServicesGrid";
+import MouseTrail from "./components/MouseTrail";
 import styles from "./page.module.scss";
 
 async function UserGreeting() {
@@ -20,6 +21,7 @@ export default function Home() {
         <div className={styles.shape2} />
         <div className={styles.shape3} />
       </div>
+      <MouseTrail />
       <main className={styles.main}>
         <div className={styles.hero}>
           <Suspense fallback={<h1 className={styles.heading}>你好，...</h1>}>

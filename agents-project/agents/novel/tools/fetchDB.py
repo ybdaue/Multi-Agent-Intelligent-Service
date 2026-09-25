@@ -58,7 +58,8 @@ _SEARCH = {
     "novel_foreshadowing": ("description",),
     "novel_world_rule": ("name", "rule"),
     "novel_outline": ("content",),
-    "novel_chapter": ("title", "summary"),
+    # 带上正文：问"某章里是不是写过 XX""某个人物在哪一章登场"得能搜到 content。
+    "novel_chapter": ("title", "summary", "content"),
 }
 
 # keyword 里的 % 和 _ 是要搜的字面量，在 _like_value 里自己转义，SQL 这边声明同一个转义符。
@@ -112,7 +113,8 @@ async def fetchDB(
       novel_outline 大纲（content / startChapterId / endChapterId）
       novel_foreshadowing 伏笔（description / plantedChapterId 埋设章 /
         resolvedChapterId 回收章 / status）
-      novel_chapter 章节（order 序号 / title / summary 精简 / content 正文 / status / wordCount）
+      novel_chapter 章节（order 序号 / title / summary 精简 / content 正文 / status / wordCount；
+        keyword 可搜正文，想知道某章写了什么、某个人物在哪一章出现就用它）
       novel_chapter_state 单章收尾时的状态快照（protagonistState 主角状态 / storyTime 故事内时间 /
         eventProgress 事件进度 / worldState 世界局势）
       novel_inspiration 全书灵感（type / content / usedChapterIds 用在哪些章）

@@ -197,6 +197,34 @@
   color: #fff;
 }
 
+/* 出口按钮：接着上面那一问，点一下就答（不必打字） */
+.answerRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.answerBtn {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--color-primary-light);
+  border-radius: 999px;
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover:not(:disabled) {
+    background: var(--color-primary);
+    color: #fff;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
 /* 进度行：这一轮跑到哪个节点了 */
 .stageBubble {
   display: inline-flex;
@@ -244,6 +272,33 @@
   gap: 0.5rem;
 }
 
+/* 清空对话：跟发送键等大，但是个安静的次要动作 —— 描边不填色，悬停才露红 */
+.clearBtn {
+  flex-shrink: 0;
+  width: 2.25rem;
+  height: 2.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: color 150ms, border-color 150ms;
+
+  &:hover:not(:disabled) {
+    color: #ef4444;
+    border-color: #ef4444;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
 .textarea {
   flex: 1;
   min-width: 0;
@@ -273,6 +328,27 @@
   &:disabled {
     background: var(--color-bg);
     cursor: not-allowed;
+  }
+}
+
+/* 停止生成：跟发送键同一个位置同一个大小，红一下让人认出这是"掐断" */
+.stopBtn {
+  flex-shrink: 0;
+  width: 2.25rem;
+  height: 2.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: #ef4444;
+  color: #fff;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background 150ms;
+
+  &:hover {
+    background: #dc2626;
   }
 }
 

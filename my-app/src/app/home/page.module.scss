@@ -7,12 +7,19 @@
   padding: 2.5rem 1.5rem;
   overflow-y: auto;
   flex: 1;
-  animation: fadeIn 0.3s ease;
 }
 
 .hero {
   margin-bottom: 2.5rem;
   position: relative;
+  transform-origin: 50% 100%;
+  will-change: transform;
+  animation: greetingDrop 1.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+
+  :global(html.intro-skip) & {
+    animation: none;
+    will-change: auto;
+  }
 }
 
 .heading {
@@ -132,5 +139,41 @@
   }
   66% {
     transform: translate3d(170px, -120px, 0) scale(0.74);
+  }
+}
+
+/* ── 问候语掉落弹跳 ──────────────────────────────── */
+
+@keyframes greetingDrop {
+  0% {
+    transform: translateY(-35vh) rotate(0deg);
+    animation-timing-function: cubic-bezier(0.33, 0, 0.67, 0.33);
+  }
+  48% {
+    transform: translateY(0) rotate(0deg);
+    animation-timing-function: cubic-bezier(0, 0, 0.58, 1);
+  }
+  57% {
+    transform: translateY(-14px) rotate(-0.6deg);
+    animation-timing-function: cubic-bezier(0.33, 0.67, 0.67, 1);
+  }
+  73% {
+    transform: translateY(0) rotate(0deg);
+    animation-timing-function: cubic-bezier(0, 0, 0.58, 1);
+  }
+  79% {
+    transform: translateY(-5px) rotate(0.3deg);
+    animation-timing-function: cubic-bezier(0.33, 0.67, 0.67, 1);
+  }
+  88% {
+    transform: translateY(0) rotate(0deg);
+    animation-timing-function: cubic-bezier(0, 0, 0.58, 1);
+  }
+  92% {
+    transform: translateY(-2px) rotate(-0.1deg);
+    animation-timing-function: cubic-bezier(0.33, 0.67, 0.67, 1);
+  }
+  100% {
+    transform: translateY(0) rotate(0deg);
   }
 }

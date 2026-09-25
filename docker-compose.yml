@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456
+      POSTGRES_DB: demo
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+
+  chroma:
+    image: chromadb/chroma:1.5.10.dev227
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadata:/chroma/chroma
+
+  agents-api:
+    build:
+      context: ./agents-project
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./agents-project:/app
+      - ./agents-project/models:/app/models
+    environment:
+      - APP_ENV=development
+      - postgreSQL_URL=postgresql://postgres:123456@postgres:5432/demo
+      - redis_URL=redis://redis:6379/0
+      - CHROMA_SERVER_HOST=chroma
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      chroma:
+        condition: service_started
+
+  nextjs:
+    build:
+      context: ./my-app
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./my-app:/app
+      - /app/node_modules
+    environment:
+      - DATABASE_URL=postgresql://postgres:123456@postgres:5432/demo
+      - NEXT_PUBLIC_API_URL=http://agents-api:8080
+      - NEXT_PUBLIC_BETTER_AUTH_URL=http://26.41.157.27:3000
+      - WATCHPACK_POLLING=true
+      - BETTER_AUTH_SECRET=CzCF7e6Cm55zLJi+VTM6EUf1VfSjyNg9OdnuBhT/GSM=
+    depends_on:
+      - postgres
+      - agents-api
+
+volumes:
+  pgdata:
+    external: true
+    name: b98071ecf5e734b76311d81113dea4c992267c2ec69d24cdd36581704d7a0edc
+  chromadata:

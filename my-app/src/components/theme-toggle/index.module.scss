@@ -1,0 +1,63 @@
+.iconToggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(99, 102, 241, 0.16);
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover {
+    background: rgba(99, 102, 241, 0.14);
+    color: var(--color-primary-dark);
+    border-color: rgba(99, 102, 241, 0.28);
+  }
+
+  :global(.dark) & {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.10);
+    color: rgba(255, 255, 255, 0.75);
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.18);
+      color: #fff;
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+  }
+}
+
+.switchToggle {
+  position: relative;
+  height: 1.25rem;
+  width: 2.25rem;
+  border-radius: 9999px;
+  background: var(--color-primary);
+  border: none;
+  cursor: pointer;
+  transition: background 150ms;
+  flex-shrink: 0;
+
+  :global(.dark) & {
+    background: rgba(249, 115, 22, 0.5);
+  }
+}
+
+.switchKnob {
+  position: absolute;
+  left: 0.125rem;
+  top: 0.125rem;
+  height: 1rem;
+  width: 1rem;
+  border-radius: 9999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 150ms;
+
+  &.dark {
+    transform: translateX(1rem);
+  }
+}

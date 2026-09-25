@@ -1,0 +1,9 @@
+rows: 6
+===== 1f1b67c4-f872-696e-8032-236b5741446a 解不开 ext_hook missing
+===== 1f1b67c4-f854-6357-8031-8fb487c22b1c 解不开 ext_hook missing
+===== 1f1b67c4-f6f3-64f2-8030-0c079aac6e85 解不开 ext_hook missing
+===== 1f1b67c4-e577-6250-802f-cc63d658e303 解不开 ext_hook missing
+===== 1f1b67bd-5fb3-60b9-802e-695b35eb8b67 解不开 ext_hook missing
+===== 1f1b67c4-e537-6e5a-8004-26ea04887771 ns= 'reader:724e6bf6-42d0-6380-e9ed-3b46a4aa8072' top: ['v', 'ts', 'id', 'channel_values', 'channel_versions', 'versions_seen', 'updated_channels']
+   cv keys: ['novel', 'active_chapter', 'user_message', 'materials', 'facts', 'questions', 'report', 'chapter_review', 'chapter_conflicts']
+   active_chapter: {"chapter_id": "", "chapter_title": "第2章 十三分钟", "chapter_order": 2, "chapter_status": "draft", "chapter_word_count": 2602, "chapter_summary": "二十点封口前，陈默再入17号裂口底层夹层，发现囊壁内裹着四人：丙五号两名队员已死，一名少年力竭，唯一活着的散人郑大雷正\"存伤\"以待时机。郑大雷推掌炸开囊壁，陈默借其能力\"承接·返\"看清机制，却只救出他一人，少年死前塞给他一块刻着\"已处置\"D档编号的金属牌。二人赶在油桶倾倒前逃出，陈默以规程第十一条和韩

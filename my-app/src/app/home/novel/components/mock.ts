@@ -8,6 +8,9 @@ export const MOCK_NOVELS: Novel[] = [
   {
     id: "novel-changye",
     title: "长夜将至",
+    wordCount: 0,
+    tropes: "权谋",
+    style: "冷峻",
     chapters: [
       {
         id: "changye-1",
@@ -45,6 +48,9 @@ export const MOCK_NOVELS: Novel[] = [
   {
     id: "novel-shanhai",
     title: "山海拾遗录",
+    wordCount: 0,
+    tropes: "志怪",
+    style: "淡雅",
     chapters: [
       {
         id: "shanhai-1",

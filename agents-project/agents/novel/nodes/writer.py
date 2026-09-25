@@ -1,14 +1,13 @@
-"""写新章：agent 照 writerSkill 写出正文，节点再收下、总结，交回父图。
+"""写新章：agent 照 writerSkill 写出正文，节点收下，交回父图。
 
-prepare 备料（前文、本章生效的大纲与世界规则、设定目录）、write 写、save 收稿并卡字数、
-summarize 压缩摘要。收稿与回炉全在图里，模型忘写台账最多少条关联记录。
-子图对话不上交父图（父图 messages 后面要整段交给 reader / chat）。
-"""
-import re
+prepare 备料（复用父图缓存的 writer_context）、write 写、save 收稿并卡字数。
+收稿与回炉全在图里，模型忘写台账最多少条关联记录。子图对话不上交父图。"""
+
+import json
 from typing import Annotated, TypedDict
 
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -20,25 +19,28 @@ from ..utils.chapter_information import (
     CHAPTER_MAX_WORDS,
     CHAPTER_MIN_WORDS,
     MAX_WRITE_TRIES,
-    chapter_title,
     count_chapter_words,
     get_writer_context,
     next_chapter_order,
+    split_title,
 )
-from ..utils.ledger import parse_ledger, split_submission
-from ..utils.model import MainModel, compressModel
+from ..utils.inspiration import render_inspirations
+from ..utils.ledger import parse_ledger, split_submission, auto_complete_refs, fetch_names
+from ..utils.model import MainModel
 from ..utils.novel_information import render_protagonists
-from ..utils.prompt import SUMMARIZE_PROMPT, WRITER_PROMPT
+from ..utils.prompt import WRITER_PROMPT
+from ..utils.trace import traced
 
 
 class WriterInput(TypedDict):
-    """父图传进来的：小说设定、上一轮可能留在 state 里的章节，和 reader 对这一稿的意见。"""
-
     novel: NovelMeta
     active_chapter: ChapterMeta
     chapter_review: ChapterReview
     chapter_attempt: int
     edit_feedback: str
+    user_message: str
+    inspirations: list
+    writer_context: dict                # resolve 预查的上下文，prepare 复用跳过查库
 
 
 class WriterOutput(TypedDict):
@@ -55,9 +57,11 @@ class WriterState(TypedDict):
     active_chapter: Annotated[ChapterMeta, merge_chapter]
     chapter_review: ChapterReview
     chapter_attempt: int
-    edit_feedback: str            # 用户看过审稿结论后说的「往哪改」，回炉时并进 _retry_note
-    write_tries: int              # 子图内部：这一稿在字数上被打回来几次
-    prev_past_summary: dict       # 子图内部：上一章留下的前文总结
+    edit_feedback: str
+    user_message: str
+    inspirations: list
+    write_tries: int
+    writer_context: dict                # resolve 预查的上下文，prepare 复用
 
 
 # 不挂 run_skill_script（不建文件、不跑脚本，字数在 save 里用 Python 卡）、
@@ -80,7 +84,7 @@ def _retry_note(state: WriterState, order: int, problems: str, feedback: str = "
         lines.append(f"审查意见：\n\n{problems}")
     # 审查通过、用户却要再改时 problems 是空的，只有这一块 —— 少了它模型就无从改起。
     if feedback:
-        lines.append(f"用户的要求：\n\n{feedback}")
+        lines.append(f"用户看过这一稿之后又说：\n\n{feedback}")
 
     draft = (chapter.get("chapter_content") or "").strip()
     if draft:
@@ -107,6 +111,19 @@ def _briefing(state: WriterState, context: dict) -> str:
     lines = [f"请写第 {order} 章。" + ("（回炉重写）" if (problems or feedback) else "")]
     if problems or feedback:
         lines.append(_retry_note(state, order, problems, feedback))
+    # 用户这一轮自己说的那句要原样摆进来：「这一章只写什么、不写什么」只说在这句话里。
+    # 回炉时也照摆，但说法得换：回炉意味着读者看过这一稿之后点了"按库里改"（或审查没过），
+    # 那是他后来改的口 —— 再让"以他原话为准"压在上面，两边就一直对着干、来回空转。
+    said = (state.get("user_message") or "").strip()
+    if said:
+        if problems or feedback:
+            lines.append(f"用户当初对这一章的要求（按上面的回炉意见来，别照它顶）：\n\n{said}")
+        else:
+            lines.append(f"用户对这一章的要求（照它写，它跟大纲冲突时以它为准）：\n\n{said}")
+    inspirations = render_inspirations(state.get("inspirations") or [])
+    if inspirations:
+        lines.append(f"用户这次给的素材：\n{inspirations}")
+
     lines.append(
         f"《{novel.get('novel_title') or '未命名'}》；"
         f"小说套路：{novel.get('novel_tropes') or '未填'}；"
@@ -162,18 +179,12 @@ def _briefing(state: WriterState, context: dict) -> str:
 
 
 async def prepare(state: WriterState, config: RunnableConfig) -> dict:
-    """取这一章要用的材料（顺带拿到新章该用的序号），交给 agent。
-
-    prepare 每次调用只跑一次，所以这里的 +1 就是「本章写到第几稿」。
-    """
-    # 结论已经进 brief 了就把 chapter_review 清空（它的语义固定成「reader 对 state 里这一稿的
-    # 意见」，留着旧的会让下一轮误判成又被退了）。write_tries 是子图内部的字数重试计数。
+    """取这一章要用的材料，复用 resolve 缓存的 writer_context，跳过重复查库。"""
     handed = {
         "chapter_attempt": state.get("chapter_attempt", 0) + 1,
         "chapter_review": {"passed": True, "problems": ""},
         "write_tries": 0,
     }
-
     novel_id = (config.get("configurable") or {}).get("novel_id")
     if not novel_id:
         return {
@@ -181,10 +192,9 @@ async def prepare(state: WriterState, config: RunnableConfig) -> dict:
             "messages": [HumanMessage(content="拿不到当前这本书的编号，写不了。")],
         }
 
-    context = await get_writer_context(novel_id)
+    context = state.get("writer_context") or await get_writer_context(novel_id)
     return {
         **handed,
-        "prev_past_summary": context.get("prev_past_summary") or {},
         "messages": [HumanMessage(content=_briefing(state, context))],
     }
 
@@ -223,92 +233,64 @@ async def save(state: WriterState, config: RunnableConfig) -> Command:
         return Command(goto=END)
 
     # 先切台账再数字数：台账是元信息不是正文，混在一起会算进字数、也会被存进正文。
+    # 标题行也在这儿摘走（存 chapter_title），正文里不留它 —— 数的是正文，摘不摘都一样。
     prose, ledger_text = split_submission(content)
+    prose, title = split_title(prose)
     words = count_chapter_words(prose)
+
+    # 台账放在字数之前解析：字数回炉时要带上当前 refs/new 作提示，不能依赖它俩在后面的定义。
+    refs, new_entries = parse_ledger(ledger_text)
+    known_rows = await fetch_names(novel_id)
+    refs = auto_complete_refs(refs, prose, known_rows)
+
     tries = state.get("write_tries", 0)
     if not CHAPTER_MIN_WORDS <= words <= CHAPTER_MAX_WORDS and tries + 1 < MAX_WRITE_TRIES:
+        hint = _word_hint(words)
+        if refs or new_entries:
+            hint += "\n\n上一稿的台账（改完把这几条也报上，少了的再补）："
+            if refs:
+                hint += f"\nrefs: {json.dumps(refs, ensure_ascii=False)}"
+            if new_entries:
+                hint += f"\nnew: {json.dumps(new_entries, ensure_ascii=False)}"
         return Command(
             goto="write",
-            update={"write_tries": tries + 1, "messages": [HumanMessage(content=_word_hint(words))]},
+            update={"write_tries": tries + 1, "messages": [HumanMessage(content=hint)]},
         )
-
-    # refs 可能是 None：这一稿没给出台账。落库时旧的关联就不动，留着上一稿的。
-    refs, new_entries = parse_ledger(ledger_text)
 
     # 序号以库里的为准；字数回炉次数用完时不合格的稿子也照收，留给 reader 那一路去判。
     chapter_order = await next_chapter_order(novel_id)
     return Command(
-        goto="summarize",
+        goto=END,
         update={
             "active_chapter": {
-                # ChapterMeta 的键一个不能少：子图的 active_chapter 是整份交回父图的，
-                # 漏了谁就等于把上一轮的值抹掉。
                 "chapter_id": "",
-                "chapter_title": chapter_title(prose) or "未命名",
+                "chapter_title": title or "未命名",
                 "chapter_order": chapter_order,
                 "chapter_status": "draft",
                 "chapter_word_count": words,
-                "chapter_summary": "",       # summarize 节点补
-                "chapter_content": prose,    # 只有正文，台账不进来
-                "past_summary": {},          # summarize 节点补
+                "chapter_summary": "",
+                "chapter_content": prose,
+                "past_summary": {},
                 "chapter_state": {},
                 "chapter_inspirations": [],
-                "chapter_refs": refs,        # 落 novel_chapter_ref（None = 没给台账）
-                "chapter_new": new_entries,  # 新造的先落各表，再挂 ref
+                "chapter_refs": refs,
+                "chapter_new": new_entries,
             }
         },
     )
 
 
-_SUMMARY_BLOCK = re.compile(r"【本章精简】\s*(.*?)(?=【前文总结】|\Z)", re.S)
-_PAST_BLOCK = re.compile(r"【前文总结】\s*(.*)", re.S)
-
-
-async def summarize(state: WriterState, config: RunnableConfig) -> dict:
-    """从正文压出本章精简与前文总结，补进这一章。"""
-    chapter = state.get("active_chapter") or {}
-    content = (chapter.get("chapter_content") or "").strip()
-    if not content:
-        return {}
-
-    prev = state.get("prev_past_summary") or {}
-    prev_text = (prev.get("text") or "").strip() if isinstance(prev, dict) else ""
-    asked = (
-        f"上一版前文总结（到上一章为止的）：\n\n{prev_text}"
-        if prev_text
-        else "这是本书第一章，没有上一版前文总结。"
-    )
-
-    reply = await compressModel.ainvoke(
-        [SystemMessage(content=SUMMARIZE_PROMPT),
-         HumanMessage(content=f"{asked}\n\n这一章的正文：\n\n{content}")]
-    )
-    text = reply.content if isinstance(reply.content, str) else ""
-
-    summary = match.group(1).strip() if (match := _SUMMARY_BLOCK.search(text)) else ""
-    past = match.group(1).strip() if (match := _PAST_BLOCK.search(text)) else ""
-    if not summary and not past:
-        # 两段都没解析出来就当没这回事：下一章有「上一章全文」兜底。
-        return {}
-
-    return {
-        "active_chapter": {
-            "chapter_summary": summary,
-            "past_summary": {"text": past},
-        }
-    }
-
-
+# 进出一行人话打印（agents/novel/utils/trace.py），只管调式，不动流程。
+# write 那一步是 create_agent 子图，没有能挂打印的节点函数 —— 它的起止看前后两个节点。
 _writer_flow = StateGraph(WriterState, input_schema=WriterInput, output_schema=WriterOutput)
-_writer_flow.add_node("prepare", prepare)
+_writer_flow.add_node("prepare", traced("writer.prepare")(prepare))
 _writer_flow.add_node("write", _writer_agent)
-_writer_flow.add_node("save", save)
-_writer_flow.add_node("summarize", summarize)
+_writer_flow.add_node("save", traced("writer.save")(save))
 _writer_flow.add_edge(START, "prepare")
 _writer_flow.add_edge("prepare", "write")
 _writer_flow.add_edge("write", "save")
 # save 自己决定回炉还是收工（Command 的 goto），两条路都在图里，不由模型挑。
-_writer_flow.add_edge("summarize", END)
+_writer_flow.add_edge("save", END)
 
 # 不带 checkpointer：挂进父图时就用父图那个，子图每一步都落在同一个 thread 上。
 writer = _writer_flow.compile(name="novel_writer")

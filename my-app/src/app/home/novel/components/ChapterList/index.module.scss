@@ -54,6 +54,33 @@
   text-overflow: ellipsis;
 }
 
+/* 书名下面那行：共 N 字 · 类型 · 文风。字数只读，后两项点一下就地改 */
+.meta {
+  flex-shrink: 0;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
+}
+
+/* 点一下就改：指针 + 悬停变色充当提示（不画虚线，编辑态那个 input 也带着这个类） */
+.metaValue {
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: color 150ms;
+
+  &:hover {
+    color: var(--color-primary);
+  }
+}
+
+/* 编辑态：EditableTitle 的 input 本身是 width:100%（给章节标题用的），这一行里得收窄，
+   不然一个输入框把"共 N 字 · 第N项"整行顶开。 */
+input.metaValue {
+  width: 5rem;
+}
+
 .chapterList {
   flex: 1;
   min-height: 0;
@@ -122,6 +149,12 @@
   color: var(--color-text-tertiary);
   font-size: 0.625rem;
   line-height: 1.15rem;
+}
+
+/* 写完了、在等用户确认：这一稿还没落库，标红催一下（忘了答它就永远进不了书架） */
+.awaitingTag {
+  background: #fef2f2;
+  color: #ef4444;
 }
 
 .itemTitle {

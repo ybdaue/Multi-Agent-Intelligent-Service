@@ -24,7 +24,15 @@ interface ChapterBodyProps {
   stage: string;
   /** 对话面板整个封掉：本轮还没跑完，或本轮在别的章上跑 */
   chatDisabled: boolean;
+  /** 这一轮的流还开着（能掐断） */
+  running: boolean;
+  onStop: () => void;
   pendingQuestion: boolean;
+  /** 停在确认上时后端给的出口按钮（收下 / 按库里改） */
+  answerOptions: { id: string; label: string }[];
+  onAnswer: (option: { id: string; label: string }) => void;
+  /** 清空这本的对话记录（后端那份一起清） */
+  onClear: () => void;
   /** 本轮正在生成的那一章；和当前章是同一章时由标题旁那个徽章自己标 */
   runChapter: RunChapter | null;
 }
@@ -38,7 +46,12 @@ export default function ChapterBody({
   draft,
   stage,
   chatDisabled,
+  running,
+  onStop,
   pendingQuestion,
+  answerOptions,
+  onAnswer,
+  onClear,
   runChapter,
 }: ChapterBodyProps) {
   // 定稿了才只读；草稿与待修复都要能直接改正文
@@ -120,7 +133,12 @@ export default function ChapterBody({
         onSend={onSend}
         stage={stage}
         disabled={chatDisabled}
+        running={running}
+        onStop={onStop}
         pendingQuestion={pendingQuestion}
+        answerOptions={answerOptions}
+        onAnswer={onAnswer}
+        onClear={onClear}
       />
     </div>
   );

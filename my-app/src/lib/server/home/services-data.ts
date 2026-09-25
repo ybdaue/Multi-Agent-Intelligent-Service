@@ -1,10 +1,4 @@
-interface ServiceItem {
-  id: string;
-  title: string;
-  description: string;
-  icon: string;
-  comingSoon?: boolean;
-}
+import type { ServiceItem } from "@/types/service";
 
 export const services: ServiceItem[] = [
   { id: "novel", title: "AI 小说生成", description: "小说创作、章节续写、人物设定", icon: "✍️" },

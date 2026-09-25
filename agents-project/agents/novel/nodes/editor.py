@@ -30,11 +30,11 @@ from agents.utils.models import parse_json_value
 from ..state import ChapterMeta, ChapterReview, ChapterTarget, NovelMeta, merge_chapter
 from ..tools import fetchDB, read_skill_file
 from ..utils.chapter_information import (
-    chapter_title,
     count_chapter_words,
     get_chapter,
     get_writer_context,
     list_chapters,
+    split_title,
 )
 from ..utils.impact import (
     EDIT_SPEC,
@@ -51,18 +51,21 @@ from ..utils.impact import (
     render_entries,
     render_rows,
 )
+from ..utils.inspiration import render_inspirations
 from ..utils.ledger import (
     NEW_ENTITY_SPEC,
     TYPE_LABEL,
+    auto_complete_refs,
     fetch_catalog,
+    fetch_names,
     normalize_new,
     parse_ledger,
     split_submission,
 )
 from ..utils.model import MainModel, intentModel
 from ..utils.prompt import APPROVE_PROMPT, EDIT_CHAPTER_PROMPT, EDIT_PLAN_PROMPT, SETTLE_PROMPT
+from ..utils.trace import traced
 from ..utils.verdict import verdict
-from .writer import summarize
 
 
 class EditorInput(TypedDict):
@@ -80,6 +83,7 @@ class EditorInput(TypedDict):
     named_chapter_order: int
     edit_feedback: str
     user_message: str
+    inspirations: list
     change_impact: list
 
 
@@ -101,6 +105,7 @@ class EditorState(TypedDict, total=False):
     named_chapter_order: int        # 他话里点名的章号，plan 拿它跟 target_chapter 比
     edit_feedback: str
     user_message: str
+    inspirations: list          # 用户这一轮挂上来的素材，plan 与 revise 都摆给他看
     materials: str              # 给 plan 的：设定目录 + 章节清单
     prev_past_summary: dict     # 给 summarize 的：上一章留下的前文总结，要并进新版
     redo: bool                  # 回炉这一趟：目标与"用户同意"都是现成的，不用再问
@@ -208,6 +213,10 @@ def _plan_brief(state: EditorState) -> str:
     if order:
         lines.append(f"（他这会儿正开着第 {order} 章 —— 要改的就是这一章，你说改成什么样就行。）")
 
+    inspirations = render_inspirations(state.get("inspirations") or [])
+    if inspirations:
+        lines.append(f"用户这次给的素材：\n{inspirations}")
+
     lines.append(state.get("materials") or "")
     return "\n\n".join(line for line in lines if line)
 
@@ -252,6 +261,10 @@ def _revise_brief(state: EditorState, plan: dict, draft: dict, context: dict, or
     instruction = (plan.get("instruction") or "").strip()
     if instruction:
         lines.append(f"用户的要求：\n\n{instruction}")
+
+    inspirations = render_inspirations(state.get("inspirations") or [])
+    if inspirations:
+        lines.append(f"用户这次给的素材：\n{inspirations}")
 
     reference = _context_brief(context, order)
     if reference:
@@ -635,7 +648,7 @@ def _route_after_approve(state: EditorState) -> str:
     return "revise" if _is_chapter(state) else "done"
 
 
-def collect(state: EditorState, config: RunnableConfig) -> dict:
+async def collect(state: EditorState, config: RunnableConfig) -> dict:
     """收这一稿：切正文与台账，其余字段沿用库里那一行，序号照旧（不新起一章）。"""
     row = state.get("target") or {}
     order = row.get("chapter_order")
@@ -650,12 +663,22 @@ def collect(state: EditorState, config: RunnableConfig) -> dict:
             "edit_note": "这一版没改出来（回复是空的），你再说一次要改哪里。",
         }
 
+    # 标题行摘出来单独放（原稿的正文里本来也没有它），改稿没写标题就用原来那条。
+    prose, title = split_title(prose)
+
     # refs 可能是 None（没给台账）：落库时旧的关联一行不动，留着上一稿的。
     refs, new_entries = parse_ledger(ledger_text)
+
+    # 改章给了台账才补扫漏报的已有实体；没给就不动旧的关联（None 语义不变）。
+    if refs is not None:
+        novel_id = (config.get("configurable") or {}).get("novel_id")
+        if novel_id:
+            known_rows = await fetch_names(novel_id)
+            refs = auto_complete_refs(refs, prose, known_rows)
     return {
         "active_chapter": {
             "chapter_id": "",
-            "chapter_title": chapter_title(prose) or row.get("chapter_title") or "未命名",
+            "chapter_title": title or row.get("chapter_title") or "未命名",
             "chapter_order": order,
             "chapter_status": row.get("chapter_status") or "draft",
             "chapter_word_count": count_chapter_words(prose),
@@ -670,20 +693,16 @@ def collect(state: EditorState, config: RunnableConfig) -> dict:
     }
 
 
-def _route_after_collect(state: EditorState) -> str:
-    """收到稿子就去刷摘要；没收到（plan 已清空、写了回话）就收工。"""
-    return "summarize" if state.get("plan") else "done"
-
-
+# 进出一行人话打印（agents/novel/utils/trace.py），只管调式，不动流程。
+# revise 那一步是 create_agent 子图，没有能挂打印的节点函数 —— 它的起止看前后两个节点。
 _editor_flow = StateGraph(EditorState, input_schema=EditorInput, output_schema=EditorOutput)
-_editor_flow.add_node("prepare", prepare)
-_editor_flow.add_node("plan", plan)
-_editor_flow.add_node("settle", settle)
-_editor_flow.add_node("impact", impact)
-_editor_flow.add_node("approve", approve)
+_editor_flow.add_node("prepare", traced("editor.prepare")(prepare))
+_editor_flow.add_node("plan", traced("editor.plan")(plan))
+_editor_flow.add_node("settle", traced("editor.settle")(settle))
+_editor_flow.add_node("impact", traced("editor.impact")(impact))
+_editor_flow.add_node("approve", traced("editor.approve")(approve))
 _editor_flow.add_node("revise", _revise_agent)
-_editor_flow.add_node("collect", collect)
-_editor_flow.add_node("summarize", summarize)
+_editor_flow.add_node("collect", traced("editor.collect")(collect))
 _editor_flow.add_edge(START, "prepare")
 # 备料之后往哪走、算完范围收工还是继续，都由节点定的条件边判，不由模型挑。
 _editor_flow.add_conditional_edges("prepare", _route_after_prepare, {"plan": "plan", "impact": "impact"})
@@ -698,8 +717,7 @@ _editor_flow.add_conditional_edges(
     "approve", _route_after_approve, {"revise": "revise", "done": END}
 )
 _editor_flow.add_edge("revise", "collect")
-_editor_flow.add_conditional_edges("collect", _route_after_collect, {"summarize": "summarize", "done": END})
-_editor_flow.add_edge("summarize", END)
+_editor_flow.add_edge("collect", END)
 
 # 不带 checkpointer：挂进父图时就用父图那个，approve 的 interrupt 才能存下来。
 editor = _editor_flow.compile(name="novel_editor")

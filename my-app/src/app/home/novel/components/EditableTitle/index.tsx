@@ -12,6 +12,8 @@ interface EditableTitleProps {
   onCommit: (next: string) => void;
   onCancel: () => void;
   className?: string;
+  /** 只读态被点了：给"点一下就改"的用法（章节栏头顶那行类型 / 文风）。编辑态不理会 */
+  onClick?: () => void;
 }
 
 export default function EditableTitle({
@@ -21,6 +23,7 @@ export default function EditableTitle({
   onCommit,
   onCancel,
   className,
+  onClick,
 }: EditableTitleProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   // 身份稳定，避免父级每次重渲染都重新聚焦全选打断输入
@@ -30,7 +33,11 @@ export default function EditableTitle({
   }, []);
 
   if (!editing) {
-    return <span className={className}>{displayValue ?? value}</span>;
+    return (
+      <span className={className} onClick={onClick}>
+        {displayValue ?? value}
+      </span>
+    );
   }
 
   const commit = () => {

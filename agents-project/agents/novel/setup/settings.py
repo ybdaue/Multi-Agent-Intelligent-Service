@@ -50,13 +50,23 @@ _STRUCTURED: dict[str, str] = {
 }
 
 # 标记格式写死在 prompt.py 里，这里按同一口径解析；一轮可以交多项。
-_BLOCK = re.compile(r"【设定项】\s*([^\s【】]+)\s*【内容】\s*(.*?)(?=【设定项】|\Z)", re.S)
-
-# 标记块的起点。**必须与 api/novel/stream.py 的 SettingFilter 同一口径**：那边靠它决定
-# "从哪儿起不再发给前端"，这边靠它切出"给用户看的散文"。两边认的位置一样，
-# 流出去的 token 拼起来才等于 interrupt 里问出去的那句话。
+# 一段内容的终点是下一个【设定项】、本轮标记块的收尾【设定结束】，或整段回复到头。
 SETTING_MARK = "【设定项】"
+SETTING_END = "【设定结束】"
+
+_BLOCK = re.compile(
+    r"【设定项】\s*([^\s【】]+)\s*【内容】\s*(.*?)"
+    r"(?=" + re.escape(SETTING_MARK) + r"|" + re.escape(SETTING_END) + r"|\Z)",
+    re.S,
+)
+
+# 标记块的起止。**api/novel/stream.py 的 SettingFilter 直接复用下面的 SettingScanner**，
+# 所以"从哪儿起不再发给前端"只有这一处定义：流出去的 token 拼起来 == interrupt 里问出去的
+# 那句话，是构造出来的，不靠两个解析器各认一遍。
 _MARK = re.compile(r"(?:^|\n)[ \t>*#-]*" + re.escape(SETTING_MARK) + r"[ \t*]*")
+# 收尾标记**不长尾巴**：标记后面再吃装饰符号（`**【设定结束】**` 这种）会吃掉"可能还没到"的
+# 字符 —— 同一个回复逐块喂与整段喂的结果就不一样了，前端"流完再整段替换"会看出跳变。
+_END = re.compile(r"(?:^|\n)[ \t>*#-]*" + re.escape(SETTING_END))
 
 # 模型偶尔会写中文名而不是字段名，一并认。
 _FIELD_BY_LABEL = {label: field for field, label in SETTING_LABELS.items()}
@@ -145,17 +155,96 @@ def missing_fields(settings: dict) -> list[str]:
     return [field for field in SETTING_FIELDS if not (settings or {}).get(field)]
 
 
+# 末尾扣留的字符数：标记可能被切成两半，手里扣着一小截才认得出来。比标记本身长出一截，
+# 顺带兜住行首那点装饰符号（`** 【设定项】` 这种）—— 扣留期间扣住的那个换行不能先发出去，
+# 否则标记到了手里已经不在行首，就认不出来了。
+_HOLD = max(len(SETTING_MARK), len(SETTING_END)) + 18
+
+
+class SettingScanner:
+    """把模型的回复切成「给用户看的散文」与「标记块」，一块一块喂也能得到同一结果。
+
+    流式那一头（api/novel/stream.py 的 SettingFilter）与落库那一头（collect 调 split_reply）
+    共用这一份状态机，"发出去的 token 拼起来" == interrupt 里问出去的那句话就不再是"两个
+    解析器各认一遍、但愿认在同一处"，而是同一个东西的两种喂法。
+
+    规则（与 prompt.py 里写的格式同一口径）：
+    - 散文照发；行首碰到【设定项】就闭嘴，直到行首的【设定结束】为止，中间一个字都不发。
+    - 【设定结束】之后又是散文 —— 标记块夹在人话中间、或先说块后说话，后面那段都还在。
+      （从前是"见到【设定项】就一律闭嘴到底"，模型把话写在块后面时，那段话就永远丢了。）
+    - 模型漏写【设定结束】就闭嘴到底：宁可这一轮少说几句，也不把标记块和一段 JSON 摆给用户。
+    """
+
+    def __init__(self) -> None:
+        self.buf = ""
+        self.dropped = 0     # 已从 buf 前部处理掉的字符数，即 buf[0] 在整段回复里的位置
+        self.blocks = ""     # 收走的标记块（含两头标记），交给 parse_setting_blocks 解析
+        self.inside = False  # 当前在标记块里，不往外发
+
+    def feed(self, chunk: str) -> list[str]:
+        self.buf += chunk or ""
+        out: list[str] = []
+        while True:
+            if self.inside:
+                match = _END.search(self.buf)
+                if match is None:
+                    break
+                self.blocks += self.buf[: match.end()]
+                self._cut(match.end())
+                self.inside = False
+                continue
+            match = self._find_mark()
+            if match is None:
+                self._emit(out, self.buf[: max(0, len(self.buf) - _HOLD)])
+                self._cut(max(0, len(self.buf) - _HOLD))
+                break
+            # 起点连同它前面那个换行一起算进标记块，散文那头就不留一个空行。
+            self._emit(out, self.buf[: match.start()])
+            self.blocks += self.buf[match.start(): match.end()]
+            self._cut(match.end())
+            self.inside = True
+        return out
+
+    def finish(self) -> list[str]:
+        """整段回复喂完了：扣在手里的那截补发（正憋着的是标记块，丢弃）。"""
+        out: list[str] = []
+        if self.inside:
+            # 漏写了【设定结束】也得让这一项能被解析出来 —— 话不发了，设定照收。
+            self.blocks += self.buf
+        else:
+            self._emit(out, self.buf)
+        self.buf = ""
+        return out
+
+    def _find_mark(self):
+        for match in _MARK.finditer(self.buf):
+            # buf 前面处理过一些（dropped > 0）时，"^" 指的是 buf 开头、而不是整段回复的开头，
+            # 那种假行首不作数。
+            if match.start() == 0 and self.dropped > 0 and not match.group(0).startswith("\n"):
+                continue
+            return match
+        return None
+
+    def _cut(self, n: int) -> None:
+        self.dropped += n
+        self.buf = self.buf[n:]
+
+    @staticmethod
+    def _emit(out: list[str], text: str) -> None:
+        if text:
+            out.append(text)
+
+
 def split_reply(reply: str) -> tuple[str, str]:
     """模型这一轮的回复切成 (给用户看的散文, 标记块那段)。
 
-    切点在行首的【设定项】上 —— 要求行首是为了不被散文里顺手提到的那三个字带偏。没有标记
-    就是整段散文、标记块给空串（这一轮只是在问，还没定下东西）。
+    整段一次性喂给 SettingScanner —— 与流式那头喂 token 是同一个状态机，所以前端"流完再拿
+    question 整段替换"看不出跳变。没有标记块就是整段散文、标记块给空串（这一轮只是在问）。
     """
-    text = reply or ""
-    match = _MARK.search(text)
-    if not match:
-        return text, ""
-    return text[: match.start()], text[match.start():]
+    scanner = SettingScanner()
+    prose = "".join(scanner.feed(reply or ""))
+    prose += "".join(scanner.finish())
+    return prose, scanner.blocks
 
 
 def _as_field(name: str) -> str | None:

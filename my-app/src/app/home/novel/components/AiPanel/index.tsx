@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  BorderOutlined,
   BulbOutlined,
+  ClearOutlined,
   CloseOutlined,
   FileTextOutlined,
   LinkOutlined,
@@ -31,8 +33,18 @@ interface AiPanelProps {
   stage: string;
   /** 整个面板封掉：本轮还没跑完（别在同一 thread 上叠第二轮），或本轮在别的章上跑 */
   disabled: boolean;
+  /** 这一轮的流还开着（能掐断）。跟 disabled 不是一回事：等答复时流已经关了 */
+  running: boolean;
+  /** 掐断这一轮生成 */
+  onStop: () => void;
   /** 图在等用户答复，输入框的提示语跟着换 */
   pendingQuestion: boolean;
+  /** 停在确认上时后端给的出口（收下 / 按库里改）。为空就是普通提问，照旧打字答 */
+  answerOptions: { id: string; label: string }[];
+  /** 点了出口按钮：按它答，不用打字 */
+  onAnswer: (option: { id: string; label: string }) => void;
+  /** 清空这本书的对话记录（后端那份一起清，刷新后不会回来） */
+  onClear: () => void;
 }
 
 function AttachmentIcon({ kind }: { kind: InspirationItem["kind"] }) {
@@ -46,7 +58,12 @@ export default function AiPanel({
   onSend,
   stage,
   disabled,
+  running,
+  onStop,
   pendingQuestion,
+  answerOptions,
+  onAnswer,
+  onClear,
 }: AiPanelProps) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<InspirationItem[]>([]);
@@ -97,7 +114,7 @@ export default function AiPanel({
       </div>
 
       <div ref={scrollRef} className={styles.chatArea}>
-        {messages.length === 0 && !stage ? (
+        {messages.length === 0 && !stage && !running ? (
           <div className={styles.emptyState}>
             <div className={styles.emptyAvatar}>
               <RobotOutlined />
@@ -145,6 +162,31 @@ export default function AiPanel({
               </div>
             ))}
 
+            {/* 出口按钮：挂在等答复那一问下面，跟打字答走同一条路（见 NovelWorkspace 的
+                onAnswer），只是不必让用户把"收下"两个字打出来 */}
+            {answerOptions.length > 0 && (
+              <div className={styles.messageRow}>
+                <div className={styles.avatarWrap}>
+                  <RobotOutlined />
+                </div>
+                <div className={styles.bubbleWrap}>
+                  <div className={styles.answerRow}>
+                    {answerOptions.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        className={styles.answerBtn}
+                        disabled={disabled}
+                        onClick={() => onAnswer(option)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* 进度行：这一轮走到哪个节点了，后端按节点名报，不掺模型输出 */}
             {stage && (
               <div className={styles.messageRow}>
@@ -187,6 +229,18 @@ export default function AiPanel({
         )}
 
         <div className={styles.inputRow}>
+          {/* 清空这本的整段对话。正等答复时不给清：那一稿还没确认落库，后端也不收（它会回一句
+              让人先把这一稿定下来）—— 清历史会把那一问从快照上抹掉，那一稿就没人看得见了 */}
+          <button
+            type="button"
+            className={styles.clearBtn}
+            onClick={onClear}
+            disabled={disabled || pendingQuestion || messages.length === 0}
+            title="清空对话记录"
+            aria-label="清空对话记录"
+          >
+            <ClearOutlined />
+          </button>
           <textarea
             ref={textareaRef}
             className={styles.textarea}
@@ -213,16 +267,30 @@ export default function AiPanel({
               }
             }}
           />
-          <button
-            type="button"
-            className={styles.sendBtn}
-            onClick={send}
-            disabled={!canSend}
-            title="发送"
-            aria-label="发送"
-          >
-            <SendOutlined />
-          </button>
+          {/* 在跑就把发送换成停止：这一轮跑着的时候本来也发不出第二条，掐断它才是当下能做的事。
+              不给 disabled 门禁（面板正封着才最需要它）。 */}
+          {running ? (
+            <button
+              type="button"
+              className={styles.stopBtn}
+              onClick={onStop}
+              title="停止生成"
+              aria-label="停止生成"
+            >
+              <BorderOutlined />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={styles.sendBtn}
+              onClick={send}
+              disabled={!canSend}
+              title="发送"
+              aria-label="发送"
+            >
+              <SendOutlined />
+            </button>
+          )}
         </div>
       </div>
 

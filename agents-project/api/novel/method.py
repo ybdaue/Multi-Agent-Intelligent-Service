@@ -1,6 +1,7 @@
-"""小说的查询口：书架、正文、各类设定、这一章的台账、这本书的改动清单，外加改名 / 删书 / 改章状态三笔写。
+"""小说的查询口：书架、正文、各类设定、这一章的台账、这本书的改动清单，外加末尾那几笔写
+（改正文 / 删章 / 改章名 / 改书名类型文风 / 改章状态 / 删书 / 改受影响点状态）。
 
-除了末尾那三个写口（改名、删书、改章状态），其余全部只读。userId 一律从 request.state.user_id 取
+除了末尾那几笔写，其余全部只读。userId 一律从 request.state.user_id 取
 （auth 中间件按 Bearer token 解析出来的 better-auth cuid），再核这本书确实挂在这个用户名下 ——
 前端传进来的 id 只是定位，不作鉴权凭据。所以每个口子都先过 _require_novel，别人的书一律当
 "不存在"（404），不给"有没有"这个信息。写口同理：UPDATE / DELETE 都带 userId 限定，
@@ -23,8 +24,11 @@ threadId，所以入口认这个名字；库里存的是 novelId，两个值本�
 没有别的口子。
 """
 from fastapi import APIRouter, Form, HTTPException, Query, Request
+from psycopg.errors import DataError
 
+from agents.novel.utils.chapter_information import NOVEL_WORD_COUNT_SQL, count_chapter_words
 from agents.novel.utils.ledger import CATALOG, TYPE_LABEL
+from agents.novel.utils.run_state import RUNNING, read_run
 from api.utils.db import pg_pool
 
 router = APIRouter(prefix="/api/novel/method", tags=["小说服务"])
@@ -55,6 +59,10 @@ def _label(kind: str) -> str:
 # done 完成 / draft 草稿 / fixing 待修复。库里是普通字符串列，没有约束，所以在这里挡一道 ——
 # 别让前端一个手滑把状态写成第四种，之后没人认得出它。
 CHAPTER_STATUSES = ("done", "draft", "fixing")
+
+# novel_change_impact.status 的四档，对应 prisma 的 ImpactStatus 枚举。库里是枚举列，写别的值
+# 会直接被拒，所以在这里先挡一道，好让错误是一句人话而不是一条数据库报错。
+IMPACT_STATUSES = ("pending", "accepted", "skipped", "fixed")
 
 
 async def _own_novel(conn, novel_id: str, user_id: str) -> bool:
@@ -158,20 +166,22 @@ async def list_novels(request: Request):
             return {"total": 0, "novels": []}
 
         cur = await conn.execute(
-            'SELECT id, "novelId", title, "order", status, "wordCount" FROM novel_chapter '
-            'WHERE "novelId" = ANY(%s) ORDER BY "novelId", "order", id',
+            'SELECT id, "novelId", title, "order", status, "wordCount", "updatedAt" '
+            'FROM novel_chapter WHERE "novelId" = ANY(%s) ORDER BY "novelId", "order", id',
             ([row[0] for row in novels],),
         )
         chapters = await cur.fetchall()
 
     by_novel: dict[str, list[dict]] = {}
-    for chapter_id, novel_id, title, order, status, word_count in chapters:
+    for chapter_id, novel_id, title, order, status, word_count, updated_at in chapters:
         by_novel.setdefault(novel_id, []).append({
             "id": chapter_id,
             "title": title or "",
             "order": order,
             "status": status,
             "wordCount": word_count,
+            # 手改正文要带回来的版本令牌，原样给前端（它不许拿去 new Date，微秒会掉）。
+            "version": updated_at,
         })
 
     return {
@@ -202,15 +212,16 @@ async def get_chapter_content(
         await _require_novel(conn, threadId, request.state.user_id)
 
         cur = await conn.execute(
-            'SELECT id, title, "order", status, "wordCount", summary, content, "pastSummary" '
-            'FROM novel_chapter WHERE id = %s AND "novelId" = %s',
+            'SELECT id, title, "order", status, "wordCount", summary, content, "pastSummary", '
+            '"updatedAt" FROM novel_chapter WHERE id = %s AND "novelId" = %s',
             (chapterId, threadId),
         )
         row = await cur.fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="章节不存在")
 
-    chapter_id, title, order, status, word_count, summary, content, past_summary = row
+    (chapter_id, title, order, status, word_count, summary, content, past_summary,
+     updated_at) = row
     return {
         "threadId": threadId,
         "chapterId": chapter_id,
@@ -221,6 +232,8 @@ async def get_chapter_content(
         "summary": summary or "",
         "content": content or "",
         "pastSummary": past_summary or {},
+        # 版本令牌，见 list_novels 里那句说明。
+        "version": updated_at,
     }
 
 
@@ -432,7 +445,224 @@ async def list_impacts(
     return {"threadId": threadId, "total": len(rows), "changes": changes}
 
 
-# ===== 三个写口 =====
+# ===== 写口 =====
+
+
+@router.post("/impact/status")
+async def set_impact_status(
+    request: Request,
+    novelId: str = Form(..., description="小说 ID（也就是 threadId）"),
+    impactId: str = Form(..., description="受影响点的行 id"),
+    status: str = Form(..., description="处理到哪一步：accepted 接受 / skipped 跳过 / fixed 已修"),
+    resolution: str | None = Form(None, description="一句处理说明，不传就不动原来那句"),
+):
+    """把一处受影响点标成已处理（接受 / 跳过 / 已修），可顺带回填一句处理说明。"""
+    if status not in IMPACT_STATUSES:
+        raise HTTPException(status_code=400, detail="未知的处理状态")
+
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, novelId, request.state.user_id)
+
+        cur = await conn.execute(
+            'UPDATE novel_change_impact '
+            'SET status = %s, resolution = COALESCE(%s, resolution), "updatedAt" = now() '
+            'WHERE id = %s AND "novelId" = %s RETURNING id, status, resolution',
+            (status, resolution, impactId, novelId),
+        )
+        row = await cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="受影响点不存在")
+    return {"id": row[0], "status": row[1], "resolution": row[2] or ""}
+
+
+@router.post("/chapter/content")
+async def save_chapter_content(
+    request: Request,
+    novelId: str = Form(..., description="小说 ID（也就是 threadId）"),
+    chapterId: str = Form(..., description="章节 ID"),
+    content: str = Form(..., description="改过的正文"),
+    clientUpdatedAt: str = Form(..., description="客户端手上那一版的 updatedAt，原样回传"),
+):
+    """手改正文落库，同事务里重算这一章与全书字数。
+
+    AI 正在写同一章时挡下来（409）：那一刻库里的真相还没定，谁覆盖谁都不对，交给用户
+    等它写完确认、或先停止生成。判据是这一轮的 run marker，不是"这本书在跑" ——
+    续写新章时用户手改手上开着的那一章是合法的。
+
+    另有一道版本闸（412，与上面那道 409 分开才分得清）：clientUpdatedAt 跟库里对不上，就说明
+    用户看着的那一版已经被别人改过了（AI 刚落库、另一个标签页），这一笔不落，由用户自己决定
+    刷新还是重写。两者都得说给用户听，前端要按状态码走两条不同的出路，所以不能都用 409。
+    clientUpdatedAt 是**不透明令牌**，原样收、原样比，不要当时间戳解析（微秒会掉）。
+    """
+    run = await read_run(request.state.user_id, novelId)
+    # 空章号两边都不算数：标记里还没有目标章（闲聊那一轮、或 resolve 还没跑到）时不该挡人，
+    # 请求里带了空 chapterId 也一样 —— 两个空串相等，不这么写就会凭空 409。
+    running_chapter = (run or {}).get("chapterId") if (run or {}).get("status") == RUNNING else ""
+    if chapterId and running_chapter and running_chapter == chapterId:
+        raise HTTPException(
+            status_code=409, detail="AI 正在写这一章，等它写完确认后再改，或先停止生成"
+        )
+
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, novelId, request.state.user_id)
+
+        async with conn.transaction():
+            # 一条语句同时问出两件事：这一章还在不在（found），以及版本对不对（new_at 是不是空）。
+            # 不用"先查再改"：那样中间有窗口；这里靠 UPDATE 自己重判 WHERE，同一时刻只可能有一个
+            # 写进去，另一个落到"存在但没命中"，正好是版本闸要挡的那个 412。
+            try:
+                cur = await conn.execute(
+                    'WITH target AS ('
+                    '  SELECT "updatedAt" AS seen FROM novel_chapter WHERE id = %s AND "novelId" = %s'
+                    '), upd AS ('
+                    '  UPDATE novel_chapter c SET content = %s, "wordCount" = %s, "updatedAt" = now() '
+                    '  FROM target t WHERE c.id = %s AND t.seen = %s::timestamptz '
+                    '  RETURNING c."updatedAt" AS new_at, c."wordCount" AS wc'
+                    ') '
+                    'SELECT (SELECT count(*) FROM target) AS found, '
+                    '(SELECT new_at FROM upd) AS new_at, (SELECT wc FROM upd) AS wc',
+                    (
+                        chapterId,
+                        novelId,
+                        content,
+                        count_chapter_words(content),
+                        chapterId,
+                        clientUpdatedAt,
+                    ),
+                )
+                found, new_at, word_count = await cur.fetchone()
+            except DataError:
+                # 令牌不是一个时间戳（前端传坏了）：它跟哪一版都不相等，按"版本对不上"处理，
+                # 别把一条数据库类型错误当成 500 抛出去。
+                raise HTTPException(status_code=412, detail="这章已被改动，请刷新后重试") from None
+            total = None
+            if new_at is not None:
+                cur = await conn.execute(NOVEL_WORD_COUNT_SQL, (novelId, novelId))
+                total = await cur.fetchone()
+
+    if not found:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    if new_at is None:
+        raise HTTPException(status_code=412, detail="这章已被改动，请刷新后重试")
+    # 回传这一章的新字数与全书总字数：前端就地改这两个数，不重拉书架
+    # （重拉会把正在看的正文清空，正文是另一个接口按章取的）。
+    # updatedAt 同时是下一次保存要带回来的版本令牌，前端得原样存着。
+    return {
+        "chapterId": chapterId,
+        "updatedAt": new_at,
+        "wordCount": word_count,
+        "novelWordCount": total[0] if total else 0,
+    }
+
+
+@router.patch("/chapter")
+async def rename_chapter(
+    request: Request,
+    novelId: str = Form(..., description="小说 ID（也就是 threadId）"),
+    chapterId: str = Form(..., description="章节 ID"),
+    title: str = Form(..., description="新章名"),
+):
+    """改章名。只动 title 与 updatedAt，正文、精简、台账一概不碰。
+
+    这一笔也 bump updatedAt，所以必须把它回传：前端手上那份版本令牌跟着换新，否则用户改个
+    章名之后第一次手改正文就会被版本闸当成冲突挡下来。
+    """
+    title = title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="章节标题不能为空")
+
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, novelId, request.state.user_id)
+
+        cur = await conn.execute(
+            'UPDATE novel_chapter SET title = %s, "updatedAt" = now() '
+            'WHERE id = %s AND "novelId" = %s RETURNING title, "updatedAt"',
+            (title, chapterId, novelId),
+        )
+        row = await cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    return {"chapterId": chapterId, "title": row[0], "updatedAt": row[1]}
+
+
+@router.delete("/chapter")
+async def delete_chapter(
+    request: Request,
+    novelId: str = Query(..., description="小说 ID（也就是 threadId）"),
+    chapterId: str = Query(..., description="章节 ID"),
+):
+    """删一章，同事务里把全书总字数减回来。
+
+    这一章挂的台账靠外键 ON DELETE CASCADE 一并没了，不用逐表删；留下的序号空洞由
+    chapter_information 的"取序号小于目标的前两章"兜着，不重排。
+    """
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, novelId, request.state.user_id)
+
+        async with conn.transaction():
+            cur = await conn.execute(
+                'DELETE FROM novel_chapter WHERE id = %s AND "novelId" = %s RETURNING "order"',
+                (chapterId, novelId),
+            )
+            row = await cur.fetchone()
+            total = None
+            if row is not None:
+                cur = await conn.execute(NOVEL_WORD_COUNT_SQL, (novelId, novelId))
+                total = await cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    return {
+        "chapterId": chapterId,
+        "order": row[0],
+        "novelWordCount": total[0] if total else 0,
+    }
+
+
+@router.patch("/novel")
+async def edit_novel_meta(
+    request: Request,
+    novelId: str = Form(..., description="小说 ID（也就是 threadId）"),
+    title: str | None = Form(None, description="新书名，不传就不动"),
+    tropes: str | None = Form(None, description="新的类型 / 套路，不传就不动"),
+    style: str | None = Form(None, description="新的文风，不传就不动"),
+):
+    """改书名 / 类型 / 文风：只改传上来的那几项，没传的原样留着。"""
+    fields: list[tuple[str, str]] = []
+    if title is not None:
+        title = title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="书名不能为空")
+        fields.append(("title", title))
+    if tropes is not None:
+        fields.append(("tropes", tropes.strip()))
+    if style is not None:
+        fields.append(("style", style.strip()))
+    if not fields:
+        raise HTTPException(status_code=400, detail="没有要改的内容")
+
+    # 列名取自上面写死的三个，没有一个字来自请求，所以这里的拼接安全；值一律走 %s。
+    assignments = ", ".join(f'"{column}" = %s' for column, _ in fields)
+    params = [value for _, value in fields] + [novelId, request.state.user_id]
+
+    async with pg_pool.connection() as conn:
+        cur = await conn.execute(
+            f'UPDATE novel SET {assignments}, "updatedAt" = now() '
+            'WHERE id = %s AND "userId" = %s RETURNING title, tropes, style',
+            tuple(params),
+        )
+        row = await cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="小说不存在")
+    return {
+        "novelId": novelId,
+        "title": row[0] or "",
+        "tropes": row[1] or "",
+        "style": row[2] or "",
+    }
 
 
 @router.post("/chapter/status")
@@ -446,6 +676,8 @@ async def set_chapter_status(
 
     只动 status 与 updatedAt：正文、精简、前文总结、台账一概不碰，所以这里既不重算字数，
     也不用重跑 update 节点 —— 标个状态不该惊动任何一轮生成。
+
+    这一笔也 bump updatedAt（裸 SQL 不认 prisma 的 @updatedAt），所以要回传新值，理由同改章名。
     """
     if status not in CHAPTER_STATUSES:
         raise HTTPException(status_code=400, detail="未知的章节状态")
@@ -455,14 +687,14 @@ async def set_chapter_status(
 
         cur = await conn.execute(
             'UPDATE novel_chapter SET status = %s, "updatedAt" = now() '
-            'WHERE id = %s AND "novelId" = %s RETURNING status',
+            'WHERE id = %s AND "novelId" = %s RETURNING status, "updatedAt"',
             (status, chapterId, novelId),
         )
         row = await cur.fetchone()
 
     if row is None:
         raise HTTPException(status_code=404, detail="章节不存在")
-    return {"chapterId": chapterId, "status": row[0]}
+    return {"chapterId": chapterId, "status": row[0], "updatedAt": row[1]}
 
 
 @router.post("/novel")

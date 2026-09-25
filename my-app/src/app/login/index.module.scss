@@ -1,3 +1,5 @@
+$gutter: clamp(1.5rem, 10vw, 14rem);
+
 .page {
   position: relative;
   min-height: 100vh;
@@ -5,24 +7,34 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: var(--color-bg);
+  background: linear-gradient(to bottom, #eef1f4 0%, #e1e5eb 52%, #cdd3db 100%);
+  color-scheme: light;
   overflow: hidden;
+
+  :global(.dark) & {
+    background: #05070f;
+    color-scheme: dark;
+  }
 }
+
+/* ── WebGL 挂载前的兜底底色，保证首屏不闪白 ───────────────── */
 
 .bgGradient {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  opacity: 0;
+  animation: fadeIn 0.8s ease 0.05s forwards;
   background:
-    radial-gradient(ellipse 80% 60% at 50% -10%, rgba(99, 102, 241, 0.15) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 50% at 80% 20%, rgba(139, 92, 246, 0.1) 0%, transparent 50%),
-    radial-gradient(ellipse 50% 40% at 20% 80%, rgba(168, 85, 247, 0.08) 0%, transparent 50%);
+    radial-gradient(ellipse 60% 45% at 50% 82%, rgba(56, 189, 248, 0.24) 0%, transparent 65%),
+    radial-gradient(ellipse 90% 60% at 78% 12%, rgba(59, 130, 246, 0.14) 0%, transparent 62%),
+    radial-gradient(ellipse 70% 50% at 18% 30%, rgba(125, 211, 252, 0.12) 0%, transparent 60%);
 
   :global(.dark) & {
     background:
-      radial-gradient(ellipse 80% 60% at 50% -10%, rgba(99, 102, 241, 0.2) 0%, transparent 60%),
-      radial-gradient(ellipse 60% 50% at 80% 20%, rgba(139, 92, 246, 0.15) 0%, transparent 50%),
-      radial-gradient(ellipse 50% 40% at 20% 80%, rgba(168, 85, 247, 0.12) 0%, transparent 50%);
+      radial-gradient(ellipse 60% 45% at 50% 82%, rgba(99, 102, 241, 0.32) 0%, transparent 65%),
+      radial-gradient(ellipse 90% 60% at 78% 12%, rgba(139, 92, 246, 0.18) 0%, transparent 62%),
+      radial-gradient(ellipse 70% 50% at 18% 30%, rgba(59, 130, 246, 0.12) 0%, transparent 60%);
   }
 }
 
@@ -30,12 +42,14 @@
   position: absolute;
   inset: 0;
   pointer-events: none;
+  opacity: 0;
+  animation: fadeIn 0.9s ease 0.15s forwards;
   background-image:
-    linear-gradient(rgba(99, 102, 241, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(99, 102, 241, 0.04) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(ellipse 60% 50% at center, black, transparent 80%);
-  -webkit-mask-image: radial-gradient(ellipse 60% 50% at center, black, transparent 80%);
+    linear-gradient(rgba(59, 130, 246, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(59, 130, 246, 0.07) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 60% 50% at 50% 60%, black, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 60% 50% at 50% 60%, black, transparent 80%);
 
   :global(.dark) & {
     background-image:
@@ -44,11 +58,43 @@
   }
 }
 
+.bgRing {
+  position: absolute;
+  top: 76%;
+  left: 50%;
+  translate: -50% -50%;
+  width: 620px;
+  height: 620px;
+  border-radius: 50%;
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  pointer-events: none;
+  opacity: 0;
+  animation: fadeIn 1s ease 0.35s forwards;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 80px;
+    border-radius: 50%;
+    border: 1px solid rgba(96, 165, 250, 0.16);
+  }
+
+  :global(.dark) & {
+    border-color: rgba(139, 92, 246, 0.16);
+
+    &::before {
+      border-color: rgba(99, 102, 241, 0.1);
+    }
+  }
+}
+
 .bgShapes {
   position: absolute;
   inset: 0;
   pointer-events: none;
   overflow: hidden;
+  opacity: 0;
+  animation: fadeIn 0.8s ease 0.25s forwards;
 }
 
 .shape1 {
@@ -58,9 +104,13 @@
   width: 600px;
   height: 600px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, rgba(99, 102, 241, 0.05) 40%, transparent 70%);
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.20) 0%, rgba(59, 130, 246, 0.06) 40%, transparent 70%);
   animation: float1 12s ease-in-out infinite;
   filter: blur(20px);
+
+  :global(.dark) & {
+    background: radial-gradient(circle, rgba(139, 92, 246, 0.16) 0%, rgba(99, 102, 241, 0.05) 40%, transparent 70%);
+  }
 }
 
 .shape2 {
@@ -70,9 +120,13 @@
   width: 500px;
   height: 500px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(139, 92, 246, 0.12) 0%, rgba(139, 92, 246, 0.04) 40%, transparent 70%);
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.18) 0%, rgba(125, 211, 252, 0.05) 40%, transparent 70%);
   animation: float2 14s ease-in-out infinite;
   filter: blur(20px);
+
+  :global(.dark) & {
+    background: radial-gradient(circle, rgba(59, 130, 246, 0.14) 0%, rgba(99, 102, 241, 0.04) 40%, transparent 70%);
+  }
 }
 
 .shape3 {
@@ -82,9 +136,13 @@
   width: 350px;
   height: 350px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(168, 85, 247, 0.1) 0%, rgba(168, 85, 247, 0.03) 40%, transparent 70%);
+  background: radial-gradient(circle, rgba(125, 211, 252, 0.16) 0%, rgba(56, 189, 248, 0.04) 40%, transparent 70%);
   animation: float3 10s ease-in-out infinite;
   filter: blur(20px);
+
+  :global(.dark) & {
+    background: radial-gradient(circle, rgba(168, 85, 247, 0.1) 0%, rgba(99, 102, 241, 0.03) 40%, transparent 70%);
+  }
 }
 
 .shape4 {
@@ -94,33 +152,12 @@
   width: 400px;
   height: 400px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(99, 102, 241, 0.08) 0%, transparent 60%);
+  background: radial-gradient(circle, rgba(96, 165, 250, 0.14) 0%, transparent 60%);
   animation: float1 16s ease-in-out infinite reverse;
   filter: blur(30px);
-}
-
-.bgRing {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  translate: -50% -50%;
-  width: 600px;
-  height: 600px;
-  border-radius: 50%;
-  border: 1px solid rgba(99, 102, 241, 0.06);
-  pointer-events: none;
-
-  &::before {
-    content: "";
-    position: absolute;
-    inset: 80px;
-    border-radius: 50%;
-    border: 1px solid rgba(139, 92, 246, 0.04);
-  }
 
   :global(.dark) & {
-    border-color: rgba(99, 102, 241, 0.08);
-    &::before { border-color: rgba(139, 92, 246, 0.06); }
+    background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 60%);
   }
 }
 
@@ -141,79 +178,119 @@
   50% { transform: translate(15px, 20px) scale(1.08); }
 }
 
+/* ── 卡片 ────────────────────────────────────────────────── */
+
 .wrapper {
   position: relative;
   z-index: 1;
+  align-self: flex-end;
   width: 100%;
-  max-width: 420px;
-  padding: 1.5rem;
-  animation: fadeUp 0.6s ease;
+  max-width: 360px;
+  margin-right: calc($gutter + 120px);
+  padding: 1.5rem 0;
+  animation: fadeUp 0.55s ease 0.3s both;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: -72px;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(ellipse 60% 55% at 50% 50%, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.24) 55%, transparent 78%);
+  }
+
+  :global(.dark) &::before {
+    background: radial-gradient(ellipse 60% 55% at 50% 50%, rgba(4, 6, 14, 0.82) 0%, rgba(4, 6, 14, 0.45) 55%, transparent 78%);
+  }
 }
 
 .card {
-  background: var(--color-surface);
-  backdrop-filter: blur(20px);
-  border: 1px solid var(--color-border);
+  position: relative;
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.8);
   border-radius: 1.25rem;
-  padding: 2.5rem 2rem;
+  padding: 1.9rem 1.75rem;
   box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.04),
-    0 8px 32px rgba(0, 0, 0, 0.06);
+    var(--shadow-md),
+    0 22px 55px -24px rgba(56, 189, 248, 0.35);
+
+  :global(.dark) & {
+    background: rgba(13, 17, 33, 0.55);
+    backdrop-filter: blur(22px) saturate(140%);
+    -webkit-backdrop-filter: blur(22px) saturate(140%);
+    border-color: rgba(255, 255, 255, 0.1);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      0 0 0 1px rgba(99, 102, 241, 0.15),
+      0 24px 60px -20px rgba(124, 58, 237, 0.45);
+  }
 }
 
 .logoSection {
   text-align: center;
-  margin-bottom: 2rem;
+  margin-bottom: 1.25rem;
 }
 
 .logo {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 48px;
+  width: 42px;
+  height: 42px;
   border-radius: 14px;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  background: linear-gradient(135deg, #3b82f6, #38bdf8);
   color: #fff;
-  margin-bottom: 1rem;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+  margin-bottom: 0.75rem;
+  box-shadow: 0 4px 18px rgba(56, 189, 248, 0.42);
+
+  :global(.dark) & {
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    box-shadow: 0 4px 18px rgba(99, 102, 241, 0.45);
+  }
 }
 
 .title {
-  font-size: 1.5rem;
+  font-size: 1.375rem;
   font-weight: 700;
   color: var(--color-text);
   margin-bottom: 0.375rem;
+
+  :global(.dark) & {
+    color: #f8fafc;
+  }
 }
 
 .subtitle {
   font-size: 0.875rem;
   color: var(--color-text-secondary);
+
+  :global(.dark) & {
+    color: #9ca3af;
+  }
 }
 
 .form {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 0.85rem;
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 0.375rem;
-}
-
-.label {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  color: var(--color-text);
 }
 
 .inputWrapper {
   position: relative;
 
   &:focus-within .inputIcon {
-    color: var(--color-primary);
+    color: #0284c7;
+  }
+
+  :global(.dark) &:focus-within .inputIcon {
+    color: #a5b4fc;
   }
 }
 
@@ -224,18 +301,23 @@
   transform: translateY(-50%);
   width: 1rem;
   height: 1rem;
-  color: var(--color-text-tertiary);
+  color: rgba(100, 116, 139, 0.5);
   pointer-events: none;
   transition: color 150ms;
+
+  :global(.dark) & {
+    color: rgba(255, 255, 255, 0.35);
+  }
 }
 
 .input {
+  display: block;
   width: 100%;
-  padding: 0.75rem 1rem 0.75rem 2.5rem;
+  padding: 0.65rem 1rem 0.65rem 2.5rem;
   border: 1.5px solid var(--color-border);
   border-radius: 0.75rem;
   font-size: 0.875rem;
-  background: var(--color-bg);
+  background: #ffffff;
   color: var(--color-text);
   outline: none;
   transition: all 150ms;
@@ -246,51 +328,502 @@
   }
 
   &:focus {
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+    border-color: rgba(56, 189, 248, 0.6);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.22);
+    background: #fff;
+  }
+
+  :global(.dark) & {
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(8, 11, 26, 0.65);
+    color: #e5e7eb;
+
+    &::placeholder {
+      color: rgba(255, 255, 255, 0.28);
+    }
+
+    &:focus {
+      border-color: rgba(139, 92, 246, 0.6);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.28);
+      background: rgba(8, 11, 26, 0.85);
+    }
+
+    &:-webkit-autofill {
+      appearance: none;
+      -webkit-appearance: none;
+      -webkit-text-fill-color: #e5e7eb;
+      caret-color: #e5e7eb;
+      border-color: transparent;
+      outline: 1.5px solid rgba(255, 255, 255, 0.08);
+      outline-offset: -1.5px;
+
+      &,
+      &:hover {
+        -webkit-box-shadow: 0 0 0 1000px #090c18 inset;
+        box-shadow: 0 0 0 1000px #090c18 inset;
+      }
+
+      &:focus {
+        outline-color: rgba(139, 92, 246, 0.6);
+        -webkit-box-shadow:
+          0 0 0 1000px #090c18 inset,
+          0 0 0 3px rgba(99, 102, 241, 0.28);
+        box-shadow:
+          0 0 0 1000px #090c18 inset,
+          0 0 0 3px rgba(99, 102, 241, 0.28);
+      }
+    }
+  }
+
+  /* 浏览器自动填充会用自己的 UA 样式给输入框刷底色，并且命中 globals 里
+     `transition: background-color 5000s` 那条延迟 hack —— 后果是切主题时
+     输入框底色被 5000s 的过渡冻住、跟不动。改用不透明的 inset 阴影直接铺
+     主题底色：box-shadow 不受 UA 覆盖，也不参与那条 transition。 */
+  &:-webkit-autofill {
+    appearance: none;
+    -webkit-appearance: none;
+    -webkit-text-fill-color: var(--color-text);
+    caret-color: var(--color-text);
+    border-color: transparent;
+    outline: 1.5px solid #e5e7eb;
+    outline-offset: -1.5px;
+
+    &,
+    &:hover {
+      -webkit-box-shadow: 0 0 0 1000px #ffffff inset;
+      box-shadow: 0 0 0 1000px #ffffff inset;
+    }
+
+    &:focus {
+      outline-color: rgba(56, 189, 248, 0.6);
+      -webkit-box-shadow:
+        0 0 0 1000px #ffffff inset,
+        0 0 0 3px rgba(56, 189, 248, 0.22);
+      box-shadow:
+        0 0 0 1000px #ffffff inset,
+        0 0 0 3px rgba(56, 189, 248, 0.22);
+    }
   }
 }
 
 .forgot {
   text-align: right;
-  margin-top: -0.5rem;
+  margin-top: -0.35rem;
 }
 
 .forgotNote {
   font-size: 0.8125rem;
-  color: var(--color-text-secondary);
+  color: var(--color-text-tertiary);
+
+  :global(.dark) & {
+    color: #8b93a7;
+  }
 }
 
 .signupHint {
-  margin-top: 1.25rem;
+  margin-top: 0.875rem;
   text-align: center;
   font-size: 0.8125rem;
-  color: var(--color-text-secondary);
+  color: var(--color-text-tertiary);
+
+  :global(.dark) & {
+    color: #8b93a7;
+  }
 }
+
+/* ── 左侧装饰粒子 ──────────────────────────────────── */
+
+.decorLeft {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 420px;
+  z-index: 1;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.decorDot1,
+.decorDot2,
+.decorDot3,
+.decorDot4,
+.decorDot5,
+.decorDot6,
+.decorDot7,
+.decorDot8 {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(1px);
+}
+
+.decorDot1 {
+  top: 80px;
+  left: 130px;
+  width: 6px;
+  height: 6px;
+  background: rgba(56, 189, 248, 0.7);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.5);
+  animation: dotFloat1 6s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(139, 92, 246, 0.7);
+    box-shadow: 0 0 12px rgba(139, 92, 246, 0.5);
+  }
+}
+
+.decorDot2 {
+  top: 130px;
+  left: 210px;
+  width: 4px;
+  height: 4px;
+  background: rgba(96, 165, 250, 0.6);
+  box-shadow: 0 0 10px rgba(96, 165, 250, 0.4);
+  animation: dotFloat2 8s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(96, 165, 250, 0.6);
+    box-shadow: 0 0 10px rgba(96, 165, 250, 0.4);
+  }
+}
+
+.decorDot3 {
+  top: 50px;
+  left: 260px;
+  width: 3px;
+  height: 3px;
+  background: rgba(186, 230, 253, 0.6);
+  box-shadow: 0 0 8px rgba(186, 230, 253, 0.35);
+  animation: dotFloat3 7s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(196, 181, 253, 0.5);
+    box-shadow: 0 0 8px rgba(196, 181, 253, 0.3);
+  }
+}
+
+/* 左侧纵向分布 */
+.decorDot4 {
+  top: 220px;
+  left: 170px;
+  width: 5px;
+  height: 5px;
+  background: rgba(59, 130, 246, 0.55);
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.35);
+  animation: dotFloat4 9s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(129, 140, 248, 0.55);
+    box-shadow: 0 0 10px rgba(129, 140, 248, 0.35);
+  }
+}
+
+.decorDot5 {
+  top: 300px;
+  left: 120px;
+  width: 3.5px;
+  height: 3.5px;
+  background: rgba(125, 211, 252, 0.5);
+  box-shadow: 0 0 8px rgba(125, 211, 252, 0.32);
+  animation: dotFloat5 7.5s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(167, 139, 250, 0.45);
+    box-shadow: 0 0 8px rgba(167, 139, 250, 0.3);
+  }
+}
+
+.decorDot6 {
+  top: 380px;
+  left: 230px;
+  width: 4.5px;
+  height: 4.5px;
+  background: rgba(96, 165, 250, 0.45);
+  box-shadow: 0 0 9px rgba(96, 165, 250, 0.28);
+  animation: dotFloat6 10s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(96, 165, 250, 0.4);
+    box-shadow: 0 0 9px rgba(96, 165, 250, 0.25);
+  }
+}
+
+/* 新增 */
+.decorDot7 {
+  top: 170px;
+  left: 290px;
+  width: 3px;
+  height: 3px;
+  background: rgba(186, 230, 253, 0.5);
+  box-shadow: 0 0 8px rgba(186, 230, 253, 0.3);
+  animation: dotFloat7 8.5s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(196, 181, 253, 0.45);
+    box-shadow: 0 0 8px rgba(196, 181, 253, 0.25);
+  }
+}
+
+.decorDot8 {
+  top: 440px;
+  left: 150px;
+  width: 4px;
+  height: 4px;
+  background: rgba(59, 130, 246, 0.4);
+  box-shadow: 0 0 9px rgba(59, 130, 246, 0.22);
+  animation: dotFloat8 11s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(99, 102, 241, 0.35);
+    box-shadow: 0 0 9px rgba(99, 102, 241, 0.2);
+  }
+}
+
+.decorRing1,
+.decorRing2 {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid transparent;
+}
+
+.decorRing1 {
+  top: 40px;
+  left: 90px;
+  width: 100px;
+  height: 100px;
+  border-color: rgba(56, 189, 248, 0.12);
+  animation: ringRotate1 20s linear infinite;
+
+  :global(.dark) & {
+    border-color: rgba(99, 102, 241, 0.08);
+  }
+}
+
+.decorRing2 {
+  top: 70px;
+  left: 170px;
+  width: 60px;
+  height: 60px;
+  border-color: rgba(96, 165, 250, 0.1);
+  animation: ringRotate2 15s linear infinite reverse;
+
+  :global(.dark) & {
+    border-color: rgba(168, 85, 247, 0.06);
+  }
+}
+
+/* ── 顶部装饰粒子 ──────────────────────────────────── */
+
+.decorTop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 80px;
+  z-index: 1;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.decorTopDot1,
+.decorTopDot2,
+.decorTopDot3,
+.decorTopDot4,
+.decorTopDot5 {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(1px);
+}
+
+.decorTopDot1 {
+  top: 20px;
+  right: 25%;
+  width: 3px;
+  height: 3px;
+  background: rgba(96, 165, 250, 0.5);
+  box-shadow: 0 0 6px rgba(96, 165, 250, 0.35);
+  animation: topDotDrift1 12s ease-in-out infinite;
+
+  :global(.dark) & {
+    background: rgba(167, 139, 250, 0.5);
+    box-shadow: 0 0 6px rgba(167, 139, 250, 0.35);
+  }
+}
+
+.decorTopDot2 {
+  top: 35px;
+  right: 45%;
+  width: 2px;
+  height: 2px;
+  background: rgba(125, 211, 252, 0.5);
+  box-shadow: 0 0 5px rgba(125, 211, 252, 0.3);
+  animation: topDotDrift2 10s ease-in-out infinite 2s;
+
+  :global(.dark) & {
+    background: rgba(129, 140, 248, 0.45);
+    box-shadow: 0 0 5px rgba(129, 140, 248, 0.3);
+  }
+}
+
+.decorTopDot3 {
+  top: 15px;
+  right: 65%;
+  width: 4px;
+  height: 4px;
+  background: rgba(59, 130, 246, 0.45);
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.3);
+  animation: topDotDrift3 14s ease-in-out infinite 1s;
+
+  :global(.dark) & {
+    background: rgba(96, 165, 250, 0.4);
+    box-shadow: 0 0 8px rgba(96, 165, 250, 0.3);
+  }
+}
+
+.decorTopDot4 {
+  top: 40px;
+  right: 15%;
+  width: 2.5px;
+  height: 2.5px;
+  background: rgba(186, 230, 253, 0.5);
+  box-shadow: 0 0 5px rgba(186, 230, 253, 0.28);
+  animation: topDotDrift4 11s ease-in-out infinite 3s;
+
+  :global(.dark) & {
+    background: rgba(196, 181, 253, 0.4);
+    box-shadow: 0 0 5px rgba(196, 181, 253, 0.25);
+  }
+}
+
+.decorTopDot5 {
+  top: 25px;
+  right: 80%;
+  width: 3px;
+  height: 3px;
+  background: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.3);
+  animation: topDotDrift5 13s ease-in-out infinite 0.5s;
+
+  :global(.dark) & {
+    background: rgba(139, 92, 246, 0.45);
+    box-shadow: 0 0 6px rgba(139, 92, 246, 0.3);
+  }
+}
+
+@keyframes dotFloat1 {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.7; }
+  25% { transform: translate(30px, -20px) scale(1.3); opacity: 1; }
+  50% { transform: translate(15px, 10px) scale(0.9); opacity: 0.5; }
+  75% { transform: translate(40px, -5px) scale(1.1); opacity: 0.8; }
+}
+
+@keyframes dotFloat2 {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.6; }
+  33% { transform: translate(-20px, -15px) scale(1.4); opacity: 1; }
+  66% { transform: translate(10px, 20px) scale(0.8); opacity: 0.4; }
+}
+
+@keyframes dotFloat3 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.5; }
+  50% { transform: translate(25px, -25px); opacity: 1; }
+}
+
+@keyframes dotFloat4 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.55; }
+  50% { transform: translate(35px, -15px); opacity: 0.95; }
+}
+
+@keyframes dotFloat5 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.45; }
+  33% { transform: translate(-20px, -20px); opacity: 0.85; }
+  66% { transform: translate(15px, 5px); opacity: 0.5; }
+}
+
+@keyframes dotFloat6 {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.4; }
+  50% { transform: translate(25px, -10px) scale(1.15); opacity: 0.8; }
+}
+
+@keyframes dotFloat7 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.45; }
+  50% { transform: translate(20px, -20px); opacity: 0.85; }
+}
+
+@keyframes dotFloat8 {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.35; }
+  50% { transform: translate(30px, 10px) scale(1.2); opacity: 0.7; }
+}
+
+@keyframes ringRotate1 {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ringRotate2 {
+  to { transform: rotate(-360deg); }
+}
+
+/* ── 顶部粒子飘移 ──────────────────────────────────── */
+
+@keyframes topDotDrift1 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.35; }
+  25% { transform: translate(20px, 5px); opacity: 0.6; }
+  50% { transform: translate(-10px, 10px); opacity: 0.2; }
+  75% { transform: translate(15px, 0); opacity: 0.5; }
+}
+
+@keyframes topDotDrift2 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.3; }
+  50% { transform: translate(-25px, 8px); opacity: 0.55; }
+}
+
+@keyframes topDotDrift3 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.3; }
+  33% { transform: translate(15px, -5px); opacity: 0.6; }
+  66% { transform: translate(-12px, 6px); opacity: 0.35; }
+}
+
+@keyframes topDotDrift4 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.25; }
+  50% { transform: translate(20px, 10px); opacity: 0.5; }
+}
+
+@keyframes topDotDrift5 {
+  0%, 100% { transform: translate(0, 0); opacity: 0.3; }
+  50% { transform: translate(-15px, 5px); opacity: 0.6; }
+}
+
+/* ── 错误抖动 ─────────────────────────────────────────── */
 
 .error {
   font-size: 0.8125rem;
-  color: #ef4444;
+  color: #dc2626;
   padding: 0.625rem 0.875rem;
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
   border-radius: 0.625rem;
+  animation: shake 0.4s ease;
 
   :global(.dark) & {
-    background: rgba(239, 68, 68, 0.1);
-    border-color: rgba(239, 68, 68, 0.25);
     color: #fca5a5;
+    background: rgba(239, 68, 68, 0.12);
+    border-color: rgba(239, 68, 68, 0.3);
   }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
 }
 
 .button {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 2.75rem;
+  height: 2.5rem;
   border: none;
-  border-radius: 0.75rem;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border-radius: 999px;
+  background: linear-gradient(90deg, #3b82f6, #38bdf8);
   color: #fff;
   font-size: 0.9375rem;
   font-weight: 600;
@@ -299,7 +832,7 @@
   margin-top: 0.25rem;
 
   &:hover:not(:disabled) {
-    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.35);
+    box-shadow: 0 6px 24px rgba(56, 189, 248, 0.5);
     transform: translateY(-1px);
   }
 
@@ -310,6 +843,14 @@
   &:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  :global(.dark) & {
+    background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+
+    &:hover:not(:disabled) {
+      box-shadow: 0 6px 24px rgba(124, 58, 237, 0.55);
+    }
   }
 }
 
@@ -323,13 +864,26 @@
   animation: spin 0.6s linear infinite;
 }
 
+/* ── 主题切换 ────────────────────────────────────────── */
+
+.themeTogglePosition {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 2;
+}
+
 .features {
-  margin-top: 1.5rem;
-  padding-top: 1.5rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
   border-top: 1px solid var(--color-border);
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1rem;
+
+  :global(.dark) & {
+    border-top-color: rgba(255, 255, 255, 0.08);
+  }
 }
 
 .feature {
@@ -338,7 +892,18 @@
   gap: 0.625rem;
   font-size: 0.8125rem;
   color: var(--color-text-secondary);
+  opacity: 0;
+  animation: featureIn 0.4s ease both;
+
+  :global(.dark) & {
+    color: #9ca3af;
+  }
 }
+
+.feature:nth-child(1) { animation-delay: 0.5s; }
+.feature:nth-child(2) { animation-delay: 0.57s; }
+.feature:nth-child(3) { animation-delay: 0.64s; }
+.feature:nth-child(4) { animation-delay: 0.71s; }
 
 .featureIcon {
   display: flex;
@@ -347,52 +912,77 @@
   width: 28px;
   height: 28px;
   border-radius: 6px;
-  background: var(--color-primary-bg);
-  color: var(--color-primary);
+  background: rgba(56, 189, 248, 0.12);
+  color: #0284c7;
   flex-shrink: 0;
-}
 
-.footer {
-  position: relative;
-  z-index: 1;
-  margin-top: 2rem;
-  text-align: center;
-  font-size: 0.75rem;
-  color: var(--color-text-tertiary);
-  animation: fadeIn 0.6s ease 0.3s both;
-}
-
-.legal {
-  margin-top: 0.375rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-
-  a {
-    color: var(--color-text-secondary);
-    transition: color 150ms;
-
-    &:hover {
-      color: var(--color-primary);
-    }
+  :global(.dark) & {
+    background: rgba(99, 102, 241, 0.14);
+    color: #a5b4fc;
   }
-}
-
-.legalSep {
-  color: var(--color-text-tertiary);
-}
-
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes fadeIn {
   from { opacity: 0; }
-  to { opacity: 1; }
+  to   { opacity: 1; }
+}
+
+@keyframes featureIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ── 退出动画（登录成功→向上淡出） ────────────────────── */
+
+.exitOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: var(--color-bg);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.42s ease;
+}
+
+.page.exiting {
+  .wrapper,
+  .decorLeft,
+  .decorTop,
+  .bgGradient,
+  .bgGrid,
+  .bgRing,
+  .bgShapes {
+    opacity: 0;
+    transform: translateY(-32px);
+    transition: all 0.42s ease;
+  }
+
+  .exitOverlay {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* 窄屏回退到正中，贴右会很难看 */
+@media (max-width: 900px) {
+  .wrapper {
+    align-self: center;
+    margin-right: 0;
+    text-align: center;
+    animation: fadeUpCenter 0.55s ease 0.3s both;
+  }
+}
+
+@keyframes fadeUpCenter {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
 }

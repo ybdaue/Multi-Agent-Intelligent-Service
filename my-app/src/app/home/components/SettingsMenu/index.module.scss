@@ -73,38 +73,6 @@
   color: var(--color-text-secondary);
 }
 
-.toggle {
-  position: relative;
-  height: 1.25rem;
-  width: 2.25rem;
-  border-radius: 9999px;
-  background: var(--color-primary);
-  border: none;
-  cursor: pointer;
-  transition: background 150ms;
-  flex-shrink: 0;
-
-  :global(.dark) & {
-    background: rgba(249, 115, 22, 0.5);
-  }
-}
-
-.toggleKnob {
-  position: absolute;
-  left: 0.125rem;
-  top: 0.125rem;
-  height: 1rem;
-  width: 1rem;
-  border-radius: 9999px;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  transition: transform 150ms;
-
-  &.dark {
-    transform: translateX(1rem);
-  }
-}
-
 .divider {
   border-top: 1px solid var(--color-border);
 }

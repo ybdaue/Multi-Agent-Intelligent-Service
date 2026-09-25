@@ -60,12 +60,16 @@ export function invalidateNovel(novelId: string) {
  *
  * **不缓存**：缓存只属于下面的 useNovelQuery。本函数还供 NovelWorkspace 拉书架与正文，
  * 那两处是每一轮都要重拉的（新章得出现在列表里），顺手缓存会让它们拿回旧数据。
+ *
+ * 非 2xx 抛的错上挂着 status：调用方要靠它分辨"版本对不上"（412）与别的失败。
  */
 export async function fetchNovelJSON<T>(url: string): Promise<T> {
   const res = await request(url);
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error || `请求失败（${res.status}）`);
+    throw Object.assign(new Error(body?.error || `请求失败（${res.status}）`), {
+      status: res.status,
+    });
   }
   return (await res.json()) as T;
 }
@@ -75,6 +79,8 @@ export async function fetchNovelJSON<T>(url: string): Promise<T> {
  *
  * 与 fetchNovelJSON 同一套错误口径：非 2xx 优先抛后端那句话（"小说不存在"），而不是
  * "请求失败 (404)"。成没成看抛不抛异常，调用方成功之后自己去重拉书架。
+ *
+ * 非 2xx 抛的错上挂着 status：调用方要靠它分辨"版本对不上"（412）与别的失败。
  */
 export async function mutateNovel<T = unknown>(
   url: string,
@@ -83,7 +89,9 @@ export async function mutateNovel<T = unknown>(
   const res = await request(url, options);
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error || `请求失败（${res.status}）`);
+    throw Object.assign(new Error(body?.error || `请求失败（${res.status}）`), {
+      status: res.status,
+    });
   }
   return (await res.json().catch(() => null)) as T;
 }

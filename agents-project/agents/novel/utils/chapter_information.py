@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 
-from .ledger import CATALOG, CATALOG_SQL, render_catalog, write_ledger
+from .ledger import CATALOG, CATALOG_SQL, TITLE_LINE, render_catalog, write_ledger
 
 # 番茄最佳阅读长度，writer 照这个写，save 节点按这个卡。
 CHAPTER_MIN_WORDS = 2200
@@ -28,9 +28,11 @@ MAX_RULE_CHARS = 2_000
 NEXT_ORDER_SQL = 'SELECT COALESCE(MAX("order"), 0) + 1 FROM novel_chapter WHERE "novelId" = %s'
 
 # 上一章取正文和 pastSummary，上上一章只要精简 —— 再往前的内容早进了 pastSummary。
+# 取"严格小于目标序号里最大的两条"，不写死 order-1 / order-2：中间删过章就会有空洞，
+# 写死会让 prev_content 落空，模型被告知"这是本书第一章，没有上一章可接"。
 PREV_CHAPTERS_SQL = (
     'SELECT "order", content, summary, "pastSummary" FROM novel_chapter '
-    'WHERE "novelId" = %s AND "order" IN (%s, %s)'
+    'WHERE "novelId" = %s AND "order" < %s ORDER BY "order" DESC LIMIT 2'
 )
 
 # 大纲 / 世界规则用 startChapterId / endChapterId 圈生效区间，两列存的是章节 id，要比就得
@@ -53,11 +55,14 @@ WORLD_RULES_SQL = (
 )
 
 # novel_chapter 上 (novelId, order) 唯一，按这两个键 upsert：同一章重跑不会插出两行。
+# 冲突时**一个字都不动 title**：writer 写新章时 chapter_id 恒为空、靠这个冲突键复用已有的行，
+# 所以"改这一章"走的正是 UPDATE 这一路 —— 从前这里写着 title = EXCLUDED.title，用户手改过的
+# 章名会被 AI 重发的那一份冲掉。新章走 INSERT 那条路，标题照旧由 AI 起。
 UPSERT_SQL = (
     'INSERT INTO novel_chapter (id, "novelId", title, "order", status, content, '
     '"pastSummary", summary, "wordCount", "createdAt", "updatedAt") '
     "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, now(), now()) "
-    'ON CONFLICT ("novelId", "order") DO UPDATE SET title = EXCLUDED.title, '
+    'ON CONFLICT ("novelId", "order") DO UPDATE SET '
     "status = EXCLUDED.status, content = EXCLUDED.content, "
     '"pastSummary" = EXCLUDED."pastSummary", summary = EXCLUDED.summary, '
     '"wordCount" = EXCLUDED."wordCount", "updatedAt" = now() '
@@ -97,19 +102,22 @@ def count_chapter_words(content: str) -> int:
     return len(re.findall(r"[一-鿿]", content))
 
 
-_TITLE_LINE = re.compile(r"^#{1,6}\s*(.+)$", re.M)
+def split_title(content: str) -> tuple[str, str]:
+    """正文 → (摘掉标题行的正文, 标题)。找不到标题行就是 (原文, "")。
 
-
-def chapter_title(content: str) -> str:
-    """从正文里取章节标题：第一个以 # 开头又带「章」字的行，口径与 count_chapter_words 一致。
-
-    writer 的 save 与 editor 的 collect 都调这里，别处不许再写一份（口径不一致标题就对不上了）。
+    标题那行（`# 第X章 标题`）单独存 novel_chapter.title：页面上标题栏与正文区都在，
+    正文里再留一份就是同一句话显示两遍。writer 的 save 与 editor 的 collect 都走这里，
+    规则共用 ledger.TITLE_LINE —— 流式层按同一条摘同一行，用户看到的与存进库的才对得上。
+    标题连着它后面的空行一起摘（那空行是给标题留的，正文不需要）。
     """
-    for match in _TITLE_LINE.finditer(content or ""):
-        line = match.group(1).strip()
-        if "章" in line:
-            return line
-    return ""
+    text = content or ""
+    match = TITLE_LINE.search(text)
+    if match is None:
+        return text, ""
+    stop = match.end()
+    while stop < len(text) and text[stop] == "\n":
+        stop += 1
+    return text[: match.start()] + text[stop:], match.group(1).strip()
 
 
 def _clip(text: str, limit: int) -> str:
@@ -215,15 +223,16 @@ async def get_writer_context(novel_id: str, order: int | None = None) -> dict:
         if order is None:
             order = await _next_order(conn, novel_id)
 
-        cur = await conn.execute(PREV_CHAPTERS_SQL, (novel_id, order - 1, order - 2))
+        cur = await conn.execute(PREV_CHAPTERS_SQL, (novel_id, order))
         prev_content = ""
         prev_prev_summary = ""
         prev_past_summary = {}
-        for chapter_order, content, summary, past_summary in await cur.fetchall():
-            if chapter_order == order - 1:
+        # 按行序认：第一条是上一章，第二条是上上一章（查询已按 order 倒序）。
+        for index, (_order, content, summary, past_summary) in enumerate(await cur.fetchall()):
+            if index == 0:
                 prev_content = content or ""
                 prev_past_summary = past_summary or {}
-            elif chapter_order == order - 2:
+            else:
                 prev_prev_summary = summary or ""
 
         cur = await conn.execute(OUTLINES_SQL, (novel_id, order, order))
@@ -256,6 +265,8 @@ async def upsert_chapter(novel_id: str, chapter: dict) -> tuple[str, int]:
     入参是 ChapterMeta 那份 dict，字数落库前调用方要自己算好。
     三笔同一事务：总字数没跟上前端就对不上，台账没跟上将来改设定就查不出这一章用了什么；
     台账要 chapter_id，所以排在章节插入之后。
+
+    已存在的章不会被改标题（见 UPSERT_SQL 上面那段）：用户改过的章名以库里那份为准。
     """
     from api.utils.db import pg_pool
 

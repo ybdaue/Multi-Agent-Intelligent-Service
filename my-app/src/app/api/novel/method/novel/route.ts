@@ -22,6 +22,45 @@ function unavailable(err: unknown) {
   );
 }
 
+/**
+ * 改书名 / 类型 / 文风。只改传上来的那几项，没传的后端原样留着。
+ *
+ * 前端改书名也走这里（原来的 POST 还留着，是给没跟上的调用方的一个旧口子）。
+ */
+export const PATCH = withAuth(async (auth, req) => {
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return Response.json({ error: "请求格式错误" }, { status: 400 });
+  }
+
+  const novelId = String(form.get("novelId") ?? "").trim();
+  if (!novelId) return Response.json({ error: "缺少小说 id" }, { status: 400 });
+
+  const backendForm = new FormData();
+  backendForm.append("novelId", novelId);
+  for (const field of ["title", "tropes", "style"]) {
+    const value = form.get(field);
+    if (value !== null) backendForm.append(field, String(value));
+  }
+  if (!["title", "tropes", "style"].some((field) => backendForm.has(field))) {
+    return Response.json({ error: "没有要改的内容" }, { status: 400 });
+  }
+
+  try {
+    const backendRes = await request(`${BACKEND_URL}/api/novel/method/novel`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${auth.token}` },
+      body: backendForm,
+    });
+    if (!backendRes.ok) return forwardError(backendRes, "小说信息没能改掉");
+    return Response.json(await backendRes.json());
+  } catch (err) {
+    return unavailable(err);
+  }
+});
+
 /** 改书名。只动 title，设定一概不碰。 */
 export const POST = withAuth(async (auth, req) => {
   let form: FormData;

@@ -5,6 +5,7 @@ from .intension import intension
 from .reader import reader
 from .chat import chat
 from .load import load
+from .resolve import resolve
 from .update import update
 from .compact import compact
 
@@ -16,6 +17,7 @@ __all__ = [
     "intension",
     "chat",
     "load",
+    "resolve",
     "update",
     "compact",
 ]

@@ -92,12 +92,13 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
     },
     onQuestion: (question) => {
       // 流下来的 token 拼起来就是这句话，整段替换：接着往下打的观感，不跳变。
+      // 开书这条路只发 text（没有按钮、没有待确认的稿），所以这里只取它。
       setLines((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.role === "assistant" && last.streaming) {
-          return [...prev.slice(0, -1), { ...last, content: question, streaming: false }];
+          return [...prev.slice(0, -1), { ...last, content: question.text, streaming: false }];
         }
-        return [...prev, { id: nextId(), role: "assistant", content: question }];
+        return [...prev, { id: nextId(), role: "assistant", content: question.text }];
       });
       setWaiting(true);
       setStage("");

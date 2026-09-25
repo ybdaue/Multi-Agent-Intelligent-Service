@@ -74,10 +74,26 @@ class SettingChange(TypedDict):
     fields: dict
 
 
+class ChapterConflict(TypedDict):
+    """用户这一轮点名要的写法，跟库里某条设定对不上。不算硬伤，交用户定夺。
+
+    reader 查出来的：它对着大纲 / 世界规则 / 人物查「用户要的跟库里记的冲不冲突」。用户在
+    确认时选了保留，这一条就变成一行影响台账落库（见 nodes/confirm_chapter.py）—— 库里那条
+    设定实际已经被这一章偏离了，将来回头改它时得知道有这么一章对不上。
+    """
+
+    targetType: str                  # outline / world_rule / character ……，取值必须落在 ImpactTarget 里
+    targetName: str                  # 库里那一条的名字 / 标题，拼进 reason 让用户看懂是哪条
+    rule: str                        # 库里那条的口径 → 落 oldValue
+    want: str                        # 用户要的写法 → 落 newValue
+
+
 class ChangeImpact(TypedDict):
-    """一行影响台账，键与 novel_change_impact 的列对齐（novelId / status 落库时补）。
+    """一行影响台账，键与 novel_change_impact 的列对齐（novelId 由落库那一步补）。
 
     只是"可能受影响"的候选，不是结论；severity 是启发式初值（见 utils/impact.py）。
+    status / resolution 只有 reader 那条路给：那是用户当场点了「保留」才记下的行，
+    落库就是 skipped（不是待处理的 pending），resolution 写清他做了什么决定。
     """
 
     changeId: str
@@ -93,6 +109,8 @@ class ChangeImpact(TypedDict):
     reason: str
     severity: str
     detectedBy: str
+    status: str
+    resolution: str
 
 
 def merge_chapter(left: dict | None, right: dict | None) -> dict:
@@ -110,17 +128,29 @@ class State(MessagesState):
     # 早先几轮压成的一段话（口径见 utils/history.py），和 messages 里最近几条一起喂给模型。
     chat_summary: str = ""
 
+    # 这一轮用户挂上来的素材（图片 / 文件 / 链接），已由 /run 落 novel_inspiration 并带回 id。
+    # 每条 {id, type, name, content}：type 是 image / file / url，content 是能读出来的文字
+    # （图片这类读不了的给一句说明）。update 落章后往 usedChapterIds 里补这一章，然后清空。
+    inspirations: List[dict]
+
     # ===== 小说信息 =====
     novel: NovelMeta
+    # resolve 节点查好的上下文（前文、大纲、世界规则、设定目录），writer/reader 复用跳过重复查库
+    writer_context: dict
     active_chapter: ChapterMeta
     # 这一轮钉住的章节（请求里的 chapterId，只有"改"这一路去解析）。空只有三种来路：这一轮
     # 不是"改"、他这会儿没在看某一章、开着的那章还没落库。改章节正文时拿不到它就直接拒不动手 ——
     # 落库要落在库里那一行真实的 id 上，不能靠模型认。
     target_chapter: ChapterTarget
+    # 这一轮真正要落哪一章：resolve 定，随 SSE 的 target 事件下发给前端，让它在流的这一稿
+    # 有归属（{kind, chapterId, order}）。**不等于** target_chapter：续写新章时后者是空的。
+    target: dict
 
     # ===== 这一章的回炉闭环 =====
     # review 是这一稿的结论、attempt 是写了几稿；update 收尾时清掉，不能带到下一轮。
     chapter_review: ChapterReview
+    # reader 查出来的"用户要的写法跟库里对不上"，确认时用户选了保留就记进影响台账。
+    chapter_conflicts: List[ChapterConflict]
     chapter_attempt: int = 0
 
     # ===== 改已有内容（editor 那一路）=====

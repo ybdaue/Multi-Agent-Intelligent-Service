@@ -2,9 +2,13 @@ import type { NextConfig } from "next";
 
 const configInit = () => {
   const nextConfig: NextConfig = {
+    turbopack: {
+      root: __dirname,
+    },
     reactCompiler: true,
     reactStrictMode: true,
     devIndicators: false,
+    allowedDevOrigins: ["26.41.157.27"],
     async rewrites() {
       return [
         {

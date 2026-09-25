@@ -13,9 +13,17 @@ export const POST = withAuth(async (auth, req) => {
   const novelId = String(form.get("novelId") ?? "").trim();
   const text = String(form.get("text") ?? "").trim();
   const chapterId = String(form.get("chapterId") ?? "").trim();
+  // 附件那份元信息（JSON 字符串）原样转；真正的内容在同名的 files 里，顺序一一对应。
+  const inspirations = String(form.get("inspirations") ?? "").trim();
+  const files = form.getAll("files").filter((value): value is File => value instanceof File);
 
   if (!novelId) return Response.json({ error: "缺少小说 id" }, { status: 400 });
   if (!text) return Response.json({ error: "至少说一句要写什么" }, { status: 400 });
 
-  return forwardNovelStream(auth, "/api/novel/agent/run", { novelId, text, chapterId });
+  return forwardNovelStream(
+    auth,
+    "/api/novel/agent/run",
+    { novelId, text, chapterId, inspirations },
+    files,
+  );
 });

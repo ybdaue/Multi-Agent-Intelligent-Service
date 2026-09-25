@@ -11,7 +11,8 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
  */
 const ALLOWED = new Set([
   "novels",
-  "chapter/content",
+  // chapter/content 不在这里：它有自己的 route.ts（那边还要转 POST 存正文），
+  // 静态段优先于 [...path]，放这儿也永远轮不到。
   "chapter/ledger",
   "impacts",
   "outlines",

@@ -5,19 +5,21 @@
 - `ProseFilter`：writer / editor 的回复是「正文 + 【本章台账】+ JSON」，还可能带了动笔前的
   分析。起点在【正文】之后、终点在【本章台账】之前。规则与落库端 `ledger.split_submission`
   同口径 —— 标记文字共用 ledger 的常量，不会两边各写一份，"用户看到的"与"存进库的"才是同一段。
-  回炉（字数不合格、或用户要求再改）会让模型**重新发一次**【正文】，此时重发 `prose_start`，
-  前端据此清空临时框重写 —— 是覆盖，不是追加。
+  正文第一行还要按住读完整行：是标题（`# 第X章 标题`）就摘掉，落库端 `split_title` 摘的是
+  同一行（标题只属于标题栏，正文里不留）。回炉（字数不合格、或用户要求再改）会让模型
+  **重新发一次**【正文】，此时重发 `prose_start`，前端据此清空临时框重写 —— 是覆盖，不是追加。
 - `SettingFilter`：开书 agent（agents/novel/setup）的回复是「散文 + 【设定项】标记块」，
-  散文逐字发，标记块一个字都不发（用户看不见它）。切点与 `setup/settings.py` 的 `split_reply`
-  共用同一个行首正则，所以"发出去的 token 拼起来" == `split_reply` 的散文 == `interrupt`
-  问出去的那句话，前端「流完再拿 question 整段替换」看不出跳变。
+  散文逐字发，标记块一个字都不发（用户看不见它）。切法整个交给 `settings.SettingScanner`
+  —— 落库端 collect 算"给用户看的那句话"（`split_reply`）用的是同一份状态机，所以
+  "发出去的 token 拼起来" == `split_reply` 的散文 == `interrupt` 问出去的那句话，
+  是同一个东西的两种喂法，前端「流完再拿 question 整段替换」看不出跳变。
 
 跨 chunk 的标记靠"末尾扣留几个字符"处理：标记被切成两半时，后半截还没到，那时不能急着发。
 """
 import re
 
-from agents.novel.utils.ledger import MARK, PROSE_MARK
-from agents.novel.setup.settings import SETTING_MARK
+from agents.novel.utils.ledger import MARK, PROSE_MARK, TITLE_LINE
+from agents.novel.setup.settings import SettingScanner
 
 # 与 ledger.py 的 _PROSE / _MARK 同一套规则（那边是私有的，这边照抄样式；标记文字共用常量）。
 # 起点的两条正则：_PROSE_LINE 要求标记在行首（含流的最开头），免得把分析里引用的
@@ -28,13 +30,17 @@ _MARK = re.compile(r"[ \t>*#-]*" + re.escape(MARK) + r"[ \t*]*")
 # 扣留的尾巴长度：够藏住一个被切断的标记，也够藏住它前面的那个换行。
 _RETAIN = max(len(PROSE_MARK), len(MARK)) + 1
 
+# 正文第一行最多按住这么长还不换行，就当它不是标题行、照发 —— 标题没有这么长的，
+# 再按住就成了把正文头一段扣着不发。
+_HEAD_CAP = 120
+
 # 丢弃段攒到这么长还没见着起点标记，就当这稿没写标记、把攒下的都当正文发出去。
 # 模型漏写标记时这样还能有打字机效果（否则要等整轮跑完才整段蹦出来）；万一是分析写长了、
 # 后面才补上标记，正文模式再把那个标记当成重新起头，前端清一次框就纠回来了。
 #
-# **只在还没见过正文起点时兜底**（见 feed）：见过起点说明这是台账之后又攒起来的一段，
-# 而台账后面跟的就是那段 JSON —— 章越写越长、新造的角色越多，它就越容易超过上限，
-# 放出去等于把台账原样打在用户的稿子里（还会先清一次框，看着像正文被换成了 JSON）。
+# **兜底只在"还没切过台账"时作数**（见 feed 的 seen / cut_ledger）：切过台账说明后面攒起来的
+# 这一段就是台账的 JSON —— 章越写越长、新造的角色越多，它就越容易超过上限，放出去等于把
+# 台账原样打在用户的稿子里（还会先清一次框，看着像正文被换成了 JSON）。
 _DISCARD_CAP = 800
 
 
@@ -54,6 +60,9 @@ class ProseFilter:
     """喂进 writer / editor 的 token 文本，吐出 [(事件名, 数据), ...]。
 
     prose_start 表示"接下来这段是正文的开头"（含回炉重写），token 是正文片段。
+    feed 的 fresh 是"这一条 token 属于新的一条模型消息"：动笔前的寒暄（"我先读一下写手手册"）
+    带着工具调用单独成条，跟交稿那条之间**没有换行**，粘在一个 buf 里会让行首的「【正文】」
+    认不出来 —— 攒到上限就被整段当成正文发出去。消息边界就是换行边界，清空重找。
     """
 
     def __init__(self) -> None:
@@ -61,28 +70,42 @@ class ProseFilter:
         self.dropped = 0        # 已从 buf 前部丢弃 / 发出去的字符数，即 buf[0] 在流里的位置
         self.discarding = True  # 当前在丢：动笔前的分析，或台账那一段
         self.seen = False       # 是否出现过正文起点（决定 flush 时那段尾巴怎么处置）
+        self.cut_ledger = False # 是否已经切过台账（切过就说明往后攒的全是那一段 JSON）
+        self.head = False       # 正文第一行还没定性：标题行要摘掉，读完这行才往下发
 
-    def feed(self, chunk: str) -> list[tuple[str, dict]]:
+    def feed(self, chunk: str, fresh: bool = False) -> list[tuple[str, dict]]:
+        # 正在丢的时候换条消息 = 前面攒的那些都作废（它们要么是寒暄、要么是台账的 JSON），
+        # 新消息的第一行就是真的行首。切过台账那一段也要清：字数不合格回炉重写是同一个
+        # 回合里再调一次模型（writer 的 save 回到 write），不清的话重写的「【正文】」又被粘住，
+        # 前端那边一稿都不重发，临时框里留着的是上一稿。
+        if fresh and self.discarding:
+            self.buf = ""
+            self.dropped = 0
         self.buf += chunk or ""
         out: list[tuple[str, dict]] = []
         while True:
             if self.discarding:
                 start = _find_start(self.buf, self.dropped)
                 if start is None:
-                    if not self.seen and len(self.buf) > _DISCARD_CAP:
+                    if not self._past_prose() and len(self.buf) > _DISCARD_CAP:
                         # 攒太久了还没见着起点标记，多半是模型没写：整段当正文起头往下发。
-                        # 见过起点的（台账那一段）不走这条路 —— 那是台账的 JSON，丢掉。
+                        # 见过起点的、或已经切过台账的，都不走这条路 —— 那是台账的 JSON，丢掉。
+                        # 交给下面那一段发（head 照样按住第一行）。
                         self.discarding = False
-                        self.dropped += len(self.buf)
+                        self.head = True
                         out.append(("prose_start", {}))
-                        self._emit(out, self.buf)
-                        self.buf = ""
+                        continue
                     break
                 self._drop(start.end())
                 self.discarding = False
                 self.seen = True
+                self.head = True
                 out.append(("prose_start", {}))
                 continue
+
+            # 正文第一行先按住：那行可能是标题，读完这一行才知道摘不摘。
+            if self.head and not self._settle_head():
+                break
 
             # 正文模式：盯着台账（正文到此为止）和下一个起点（回炉重发），谁先到算谁。
             start = _find_start(self.buf, self.dropped)
@@ -91,10 +114,12 @@ class ProseFilter:
                 self._emit(out, self.buf[: ledger.start()])
                 self._drop(ledger.end())
                 self.discarding = True
+                self.cut_ledger = True
                 continue
             if start is not None:
                 self._emit(out, self.buf[: start.start()])
                 self._drop(start.end())
+                self.head = True
                 out.append(("prose_start", {}))
                 continue
 
@@ -107,23 +132,54 @@ class ProseFilter:
     def flush(self) -> list[tuple[str, dict]]:
         """流结束：扣住的尾巴补发。
 
-        没出现过起点标记就整段当正文（宁可多带一段分析，也不能把正文判没），但台账仍按标记
-        截掉 —— 与 `split_submission` 退化成 `split_ledger` 的行为一致。见过起点的说明这段
-        尾巴是台账那一段，丢掉。
+        没出现过起点标记、也没切过台账就整段当正文（宁可多带一段分析，也不能把正文判没），
+        但台账仍按标记截掉 —— 与 `split_submission` 退化成 `split_ledger` 的行为一致。
+        另外两种（见过起点、切过台账）说明这段尾巴是台账那一段，丢掉。
         """
         if not self.buf:
             return []
         out: list[tuple[str, dict]] = []
         if self.discarding:
-            if not self.seen:
-                ledger = _MARK.search(self.buf)
-                self.discarding = False
-                out.append(("prose_start", {}))
-                self._emit(out, self.buf[: ledger.start()] if ledger else self.buf)
-        else:
-            self._emit(out, self.buf)
+            if self._past_prose():
+                self.buf = ""
+                return out
+            ledger = _MARK.search(self.buf)
+            self.buf = self.buf[: ledger.start()] if ledger else self.buf
+            self.discarding = False
+            self.head = True
+            out.append(("prose_start", {}))
+        if self.head:
+            self._settle_head(final=True)
+        self._emit(out, self.buf)
         self.buf = ""
         return out
+
+    def _settle_head(self, final: bool = False) -> bool:
+        """正文第一行读完了没有；读完就把标题行摘掉（是标题的话）。
+
+        读到换行就算读完；没读到换行但已经攒到 _HEAD_CAP，也当它不是标题（标题没这么长）。
+        final 是流尾那一次：剩下多少都按"这一行读完了"算。返回假 = 还得再等几个 token。
+        """
+        cut = self.buf.find("\n")
+        if cut < 0 and not final and len(self.buf) < _HEAD_CAP:
+            return False
+        line = self.buf if cut < 0 else self.buf[:cut]
+        if TITLE_LINE.match(line):
+            stop = len(self.buf) if cut < 0 else cut + 1
+            while stop < len(self.buf) and self.buf[stop] == "\n":
+                stop += 1        # 标题后面那串空行也是给它留的，一起摘
+            self._drop(stop)
+        self.head = False
+        return True
+
+    def _past_prose(self) -> bool:
+        """这一波文本是否已经跟正文无关了（起点标记见过，或台账已经切过）。
+
+        切过台账这一条不能少：模型漏写「【正文】」时正文是靠 `_DISCARD_CAP` 兜底放出去的，
+        seen 一直是假；只认 seen 的话，台账后面那段 JSON 会被同一个兜底再放一遍 ——
+        用户那边就是"正文写着写着突然变成一坨 JSON"，还会先清一次框。
+        """
+        return self.seen or self.cut_ledger
 
     def _drop(self, n: int) -> None:
         self.dropped += n
@@ -133,67 +189,21 @@ class ProseFilter:
     def _emit(out: list[tuple[str, dict]], text: str) -> None:
         if text:
             out.append(("token", {"text": text}))
-
-
-# 与 setup/settings.py 的 _MARK 同一套规则（那边是私有的，这边照抄样式；标记文字共用常量）。
-# `^` 那个分支管流的最开头；其余必须落在行首，免得散文里顺手提到"【设定项】"这三个字就误判。
-_SETTING_LINE = re.compile(r"(?:^|\n)[ \t>*#-]*" + re.escape(SETTING_MARK) + r"[ \t*]*")
-
-# 扣留的尾巴长度：够藏住一个被切断的标记，也够藏住它前面的那个换行。
-_SETTING_RETAIN = len(SETTING_MARK) + 1
 
 
 class SettingFilter:
     """喂进开书 agent collect 节点的 token 文本，吐出 [(事件名, 数据), ...]。
 
-    只有 token 一种事件：散文逐字发；行首一旦出现【设定项】，从那儿起一个字都不再发
-    （标记块用户看不见），剩下的连同之后喂进来的全部丢掉。没有散文起点标记这回事 ——
-    开书 agent 的回复第一句就是人话。
+    只有 token 一种事件：散文逐字发，标记块（用户看不见）一个字都不发 —— "哪儿是标记块的
+    起止"是整个交给 `settings.SettingScanner` 的，这里只管把发出来的散文包成事件。
+    开书 agent 的回复第一句就是人话，没有散文起点标记那回事。
     """
 
     def __init__(self) -> None:
-        self.buf = ""
-        self.dropped = 0    # 已从 buf 前部发出去的字符数，即 buf[0] 在流里的位置
-        self.stopped = False
+        self._scanner = SettingScanner()
 
     def feed(self, chunk: str) -> list[tuple[str, dict]]:
-        if self.stopped:
-            return []
-        self.buf += chunk or ""
-        out: list[tuple[str, dict]] = []
-        mark = self._find_mark()
-        if mark is not None:
-            self._emit(out, self.buf[: mark.start()])
-            self.stopped = True
-            self.buf = ""
-            return out
-        # 标记可能被切断，尾巴先扣着；扣掉的那截是散文，发出去。
-        self._emit(out, self.buf[: max(0, len(self.buf) - _SETTING_RETAIN)])
-        self._drop(max(0, len(self.buf) - _SETTING_RETAIN))
-        return out
+        return [("token", {"text": text}) for text in self._scanner.feed(chunk)]
 
     def flush(self) -> list[tuple[str, dict]]:
-        """流结束：扣住的尾巴补发。停下来了（标记已到）那段尾巴是标记块，不发。"""
-        if self.stopped or not self.buf:
-            return []
-        out: list[tuple[str, dict]] = []
-        self._emit(out, self.buf)
-        self.buf = ""
-        return out
-
-    def _find_mark(self):
-        for match in _SETTING_LINE.finditer(self.buf):
-            # buf 前面发过一些（dropped > 0）时，"^" 指的是 buf 开头、而不是流开头，那种假行首不作数。
-            if match.start() == 0 and self.dropped > 0 and not match.group(0).startswith("\n"):
-                continue
-            return match
-        return None
-
-    def _drop(self, n: int) -> None:
-        self.dropped += n
-        self.buf = self.buf[n:]
-
-    @staticmethod
-    def _emit(out: list[tuple[str, dict]], text: str) -> None:
-        if text:
-            out.append(("token", {"text": text}))
+        return [("token", {"text": text}) for text in self._scanner.finish()]

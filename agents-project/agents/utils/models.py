@@ -10,7 +10,7 @@ BASE_URLS: dict[str, Optional[str]] = {
     "openai": None,
     "deepseek": "https://api.deepseek.com",
     "zhipu": "https://open.bigmodel.cn/api/paas/v4/",  # GLM
-    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "qwen": "https://maas.qianwenaiapi.com/compatible-mode/v1",
     "guiji":"https://api.siliconflow.cn/v1"
 }
 
@@ -230,16 +230,18 @@ def parse_json_object(text: Any) -> dict:
 
 # 模型工厂
 def MainModel(temperature: float = 0.3,**kwargs: Any):
-    # return create_chat_model("qwen", "qwen3.8-flash", temperature=temperature, **kwargs)
+    return create_chat_model("qwen", "deepseek-v4-flash", temperature=temperature, **kwargs)
     # return create_chat_model("guiji", "deepseek-ai/DeepSeek-V4-Flash", temperature=temperature, **kwargs)
-    return create_chat_model("deepseek", "deepseek-flash", temperature=temperature, **kwargs)
+    # return create_chat_model("deepseek", "deepseek-flash", temperature=temperature, **kwargs)
 
 def IntentModel(temperature: float = 0.3,**kwargs: Any):
-    return create_chat_model("deepseek", "deepseek-flash", temperature=temperature, **kwargs)
+    return create_chat_model("qwen", "deepseek-v4-flash", temperature=temperature, **kwargs)
+    # return create_chat_model("deepseek", "deepseek-flash", temperature=temperature, **kwargs)
     # return create_chat_model("guiji", "Qwen/Qwen3-8B", temperature=temperature, **kwargs)
 
 def CompressModel(temperature: float = 0.3,**kwargs: Any):
-    return create_chat_model("deepseek", "deepseek-flash", temperature=temperature, **kwargs)
+    return create_chat_model("qwen", "deepseek-v4-flash", temperature=temperature, **kwargs)
+    # return create_chat_model("deepseek", "deepseek-flash", temperature=temperature, **kwargs)
     # return create_chat_model("guiji", "Qwen/Qwen3-8B", temperature=temperature, **kwargs)
 
 def RerankModel(

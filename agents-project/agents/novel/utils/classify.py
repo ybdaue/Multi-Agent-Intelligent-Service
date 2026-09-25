@@ -9,8 +9,22 @@ def classify(state: State) -> str:
     return state["intension"]
 
 
+def route_after_chat(state: State) -> str:
+    """闲聊之后：手上还压着一份没确认的稿，就转回确认那一问；否则照旧收尾。
+
+    从 confirm_chapter 转过来的闲聊是"用户没点按钮、而是问了一句"：他要的答复由 chat 给
+    （问答在 messages 末尾），这一稿仍在 active_chapter 里等着 —— 不能让 chat 顺手走到
+    update，那是把他没确认的稿落库了。判据跟 reader.gather / confirm_chapter / update
+    同一个口径：正文非空、chapter_id 为空 = 这一稿还没落库。
+    """
+    chapter = state.get("active_chapter") or {}
+    if chapter.get("chapter_content") and not chapter.get("chapter_id"):
+        return "confirm_chapter"
+    return "update"
+
+
 def route_after_load(state: State) -> str:
-    """设定齐了照意图去写 / 去改；库里没有这本书就收尾回用户一句话。
+    """设定齐了先去定目标（resolve）；库里没有这本书就收尾回用户一句话。
 
     闸认 fromDB：为假说明这本书还没建成 —— 开书是「新建小说」弹窗里那个独立图的事，
     这里不许动笔（writer 会拿一份空设定去写第一章）。load 已经把引导的话写进 edit_note，
@@ -19,3 +33,12 @@ def route_after_load(state: State) -> str:
     if not (state.get("novel") or {}).get("fromDB"):
         return "update"
     return state["intension"]
+
+
+def route_after_resolve(state: State) -> str:
+    """目标定了就分头去：续写走 writer，改稿走 editor。
+
+    只读意图、不做判断 —— 拿不准的一律当续写（resolve 那条路的两个意图之外进不来）。
+    """
+    return "edit" if state.get("intension") == "edit" else "write"
+

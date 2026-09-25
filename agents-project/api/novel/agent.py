@@ -12,25 +12,45 @@ chapter_id 只服务于"改已有章节正文"这一路：intension 在识别出
 interrupt 一来这一轮就结束了，所以流里要把「问题」交给前端；用户答了再走 /resume，同一个
 thread_id，用 Command(resume=答复) 接着跑。
 
+停在确认上的那一稿只活在 checkpoint 里（书架列表里没有它），而正文一落库就从快照里抹掉了 ——
+所以"交上来、还没确认"这件事只能问快照：GET /pending 就是这个问法，前端刷新 / 切书时拿它
+重建现场；/run 也拿它当门禁，免得用户没答上一稿又开新章、正文被整份盖掉。对话历史同理，
+也在 checkpoint 里（state.messages），前端刷新后同样只能靠 GET /history 问回来。
+
 开书（把一本书的设定从零问齐、落库）不在这个图里：那是「新建小说」弹窗专用的独立图，
 见 api/novel/setup.py。这里碰到库里没有的书，只回一句让用户去弹窗建。
 
 /run 与 /resume 走 SSE：writer / editor 的正文逐字下发，台账一个字不露（见 stream.py 的
 ProseFilter）。run_novel / resume_novel 那两条非流式入口留着，测试与脚本直接调它们。
 """
+import asyncio
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
 from agents.novel import novel_agent
+from agents.novel.utils.history import last_reply, visible_messages
+from agents.novel.utils.inspiration import add_inspirations
+from agents.novel.utils.run_state import (
+    AWAITING,
+    CANCELLED,
+    DONE,
+    mark_running,
+    mark_settled,
+    read_run,
+)
 
 from .stream import ProseFilter
 
 router = APIRouter(prefix="/api/novel/agent", tags=["小说智能体"])
+
+# 收尾那笔写库得单独派任务（见 _settle_later），留着强引用免得被 GC 掉跑不完。
+_settle_tasks: set[asyncio.Task] = set()
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -45,6 +65,7 @@ _SSE_HEADERS = {
 _STAGE_TEXT = {
     "intension": "正在理解你的需求…",
     "load": "正在读取这本书的设定…",
+    "resolve": "正在确定要写哪一章…",
     "writer": "正在写这一章…",
     "reader": "正在审稿…",
     "confirm_chapter": "等你看这一稿…",
@@ -99,6 +120,105 @@ def _config(user_id: str, novel_id: str, chapter_id: str = "") -> dict:
     }
 
 
+def _question(value) -> dict:
+    """interrupt 交上来的问题归一化成 {text, options}。
+
+    confirm_chapter 现在传的是对象（text 加给前端做按钮的 options）；editor.approve 那处还是
+    老样子传纯字符串，这里一并兜住 —— 前端只认这一种形状。
+    """
+    if isinstance(value, dict):
+        return {
+            "text": str(value.get("text") or ""),
+            "options": value.get("options") or [],
+        }
+    return {"text": str(value or ""), "options": []}
+
+
+def _asked(result: dict) -> dict:
+    """结果里那个还没答的问题；没有就空 dict。
+
+    result 是图给的 values、或是 _final_payload 拼出来的同形字典，两种都对得上。
+    """
+    interrupts = result.get("__interrupt__")
+    if not interrupts:
+        return {}
+    first = interrupts[0] if isinstance(interrupts, (list, tuple)) else interrupts
+    asked = _question(getattr(first, "value", first))
+    return asked if (asked["text"] or asked["options"]) else {}
+
+
+def _draft(result: dict) -> dict:
+    """交上来、还没落库的那一稿正文。前端刷新后据它重建临时框。
+
+    落库那一步会把正文从快照里抹掉（见 update），所以真有内容时一定是停在确认上。
+    """
+    chapter = result.get("active_chapter") or {}
+    content = chapter.get("chapter_content") or ""
+    if not content or chapter.get("chapter_id"):
+        return {}
+    return {
+        "order": chapter.get("chapter_order"),
+        "title": chapter.get("chapter_title") or "",
+        "content": content,
+    }
+
+
+# 文本类附件的扩展名兜底：content_type 未必准（txt 传成 octet-stream 很常见）。
+_TEXT_EXT = (".md", ".txt", ".json", ".csv", ".html", ".htm", ".log", ".yml", ".yaml")
+# 单个附件读取上限：再大就不是"给模型看的素材"了。
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+# 一条附件进提示词的字符上限。
+MAX_ATTACH_CHARS = 4_000
+
+
+async def _attachment(file: UploadFile) -> str:
+    """一个上传转成给模型看的文字；图片与二进制只说"有这么个文件，看不了内容"。
+
+    模型是纯文本的，没有 vision —— 图片硬塞字节没有意义，如实告诉它读不了，免得它以为看过。
+    """
+    name = (file.filename or "").strip()
+    content_type = (file.content_type or "").lower()
+    if not (content_type.startswith("text/") or name.lower().endswith(_TEXT_EXT)):
+        kind = "图片" if content_type.startswith("image/") else f"{content_type or '未知类型'} 文件"
+        return f"（{kind}，看不了内容）"
+
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        return "（文件过大，未读取）"
+    text = data.decode("utf-8", errors="replace")
+    return text[:MAX_ATTACH_CHARS] + ("…（已截断）" if len(text) > MAX_ATTACH_CHARS else "")
+
+
+async def _inspirations(meta: str, files: list[UploadFile]) -> list[dict]:
+    """这一轮挂上来的素材：前端的元信息 + 上传件的内容（能读的才读）。
+
+    meta 是 JSON 数组，字段与前端 InspirationItem 对齐（kind / name / url / hasFile）。带
+    hasFile 的那几条与 files **同序**（前端两个数组一起拼的），按顺序配回去；链接类没有上传件。
+    """
+    try:
+        parsed = json.loads(meta or "[]")
+    except ValueError:
+        parsed = []
+    if not isinstance(parsed, list):
+        parsed = []
+
+    pending = list(files)
+    items = []
+    for raw in parsed:
+        if not isinstance(raw, dict):
+            continue
+        kind = str(raw.get("kind") or "file")
+        item = {"type": kind, "name": str(raw.get("name") or "").strip() or "未命名"}
+        if kind == "url":
+            item["content"] = str(raw.get("url") or "").strip()
+        elif raw.get("hasFile") and pending:
+            item["content"] = await _attachment(pending.pop(0))
+        else:
+            item["content"] = "（没收到这个文件）"
+        items.append(item)
+    return items
+
+
 def _reply(result: dict) -> str:
     """图这一轮最后写给用户的一句话。
 
@@ -113,11 +233,47 @@ def _reply(result: dict) -> str:
     return ""
 
 
+def _history(values: dict) -> dict:
+    """这本书的对话栏该有的东西：用户与助手说过的话，外加更早那批的长期摘要。
+
+    messages 是 state 里唯一会无限长的通道，攒多了会被 compact 压进摘要、原文从里面删掉
+    （见 agents/novel/utils/history.py）—— 所以这里给的就是 agent 此刻还记着的那一份，不是
+    一本完整的存档。前端照它重建，用户看到的对话跟他以为 agent 记得的才是一回事。
+
+    摘要单列一个键（不是 messages 里的一条）：它不是谁说过的话，前端要摆成一条"前情"就摆。
+    """
+    messages = values.get("messages") or []
+    pairs = visible_messages(messages)
+    return {
+        "messages": [{"role": role, "content": content} for role, content in pairs],
+        "summary": values.get("chat_summary") or "",
+    }
+
+
+def _round_reply(values: dict) -> str:
+    """这一轮助手答完的那句话（用户刚问过一句、由 chat 答了才有，其余情况是空串）。
+
+    只走 question 事件给前端补气泡：那一轮的答复进了 messages，但重摆的那一问是 interrupt，
+    流里发完 question 这一轮就结束了，前端不补就只看得到问题。水合那一路不用它 —— /history
+    里已经有这句话了，再补一遍就是两条。
+    """
+    return last_reply(values.get("messages"))
+
+
 def _payload(result: dict) -> dict:
-    """把图的结果折成响应体。停在 interrupt 上就把问题交回前端，否则给这一章的字段。"""
-    interrupts = result.get("__interrupt__")
-    if interrupts:
-        return {"interrupted": True, "question": interrupts[0].value}
+    """把图的结果折成响应体。停在 interrupt 上就把问题交回前端，否则给这一章的字段。
+
+    停在提问上时 question 仍是那一段纯文本（脚本与测试直接读它），options / draft 是并列的
+    两个附加键：前者给前端出按钮，后者是那一稿的正文。
+    """
+    asked = _asked(result)
+    if asked:
+        return {
+            "interrupted": True,
+            "question": asked["text"],
+            "options": asked["options"],
+            "draft": _draft(result),
+        }
 
     chapter = result.get("active_chapter") or {}
     return {
@@ -168,53 +324,134 @@ async def resume_novel(
     return _payload(result)
 
 
-async def _final_payload(user_id: str, novel_id: str, chapter_id: str) -> dict:
+def _snapshot_values(snapshot) -> dict:
+    """快照里的状态，外加把它各处的 interrupt 归一化回 __interrupt__ 这一个键。
+
+    停在 interrupt 上时，这一版 langgraph 里 values 与 tasks[].interrupts 两处都可能是空的
+    （实测如此），所以还要一条从 updates 流里接的来路（见 _sse），两者谁先拿到算谁。
+    """
+    values = dict(snapshot.values or {})
+    if values.get("__interrupt__"):
+        return values
+    for source in (
+        getattr(snapshot, "interrupts", None),
+        next(
+            (
+                task.interrupts
+                for task in snapshot.tasks or ()
+                if getattr(task, "interrupts", None)
+            ),
+            None,
+        ),
+    ):
+        if source:
+            values["__interrupt__"] = source
+            break
+    return values
+
+
+async def _final_payload(
+    user_id: str, novel_id: str, chapter_id: str, hint: Optional[dict] = None
+) -> dict:
     """这一轮跑完（或停下）之后的响应体，从 checkpoint 快照取。
 
-    停在 interrupt 上时，问题在这一版 langgraph 里 values 与 tasks[].interrupts 两处都可能是
-    空的（实测如此），所以 `_sse` 那边还有一条从 updates 流里接的来路，两者谁先拿到算谁。
+    hint 是 updates 流里接到的那个问题（形状同 _question）；快照没认出 interrupt 时靠它兜底。
+    临时稿只在快照里，所以无论走哪条来路都从快照取。
     """
-    snapshot = await novel_agent.aget_state(_config(user_id, novel_id, chapter_id))
-    values = dict(snapshot.values or {})
-    if not values.get("__interrupt__"):
-        for source in (
-            getattr(snapshot, "interrupts", None),
-            next(
-                (
-                    task.interrupts
-                    for task in snapshot.tasks or ()
-                    if getattr(task, "interrupts", None)
-                ),
-                None,
-            ),
-        ):
-            if source:
-                values["__interrupt__"] = source
-                break
-    return _payload(values)
+    values = _snapshot_values(await novel_agent.aget_state(_config(user_id, novel_id, chapter_id)))
+    payload = _payload(values)
+    if payload.get("interrupted"):
+        payload["reply"] = _round_reply(values)
+        return payload
+    if not hint:
+        return payload
+    return {
+        "interrupted": True,
+        "question": hint.get("text") or "",
+        "options": hint.get("options") or [],
+        "draft": _draft(values),
+        "reply": _round_reply(values),
+    }
+
+
+async def _pending(user_id: str, novel_id: str, chapter_id: str) -> dict:
+    """这本书此刻有没有一份交了、还没确认落库的稿。
+
+    判据跟图里那三处（reader.gather / confirm_chapter / update）同一个口径：正文非空、
+    chapter_id 为空。挂得住 interrupt 的一定有正文 —— 所以拿它挡在 /run 门口就够。
+
+    两样都得在：正文是"有这么一稿"，问题才是"这一稿正等着人答"。只认正文的话，进程中途挂掉
+    留下的半截 checkpoint 也会被当成待确认，用户就永远开不了新章了 —— 认不出问题就当没停，
+    退回原来的行为（照跑）。
+
+    lastRun 是这一轮跑到哪儿的标记，几条返回路径上都给：前端据此认出"上一轮断了"（cancelled
+    且手上没有待确认的稿）并提示用户重来。没有标记就是没跑过。
+    """
+    run = await read_run(user_id, novel_id)
+    last_run = (
+        {"status": run.get("status"), "intension": run.get("intension"), "at": run.get("at")}
+        if run
+        else None
+    )
+
+    values = _snapshot_values(await novel_agent.aget_state(_config(user_id, novel_id, chapter_id)))
+    chapter = values.get("active_chapter") or {}
+    if not chapter.get("chapter_content") or chapter.get("chapter_id"):
+        return {"pending": False, "lastRun": last_run}
+    asked = _asked(values)
+    if not asked:
+        return {"pending": False, "lastRun": last_run}
+    return {
+        "pending": True,
+        "text": asked.get("text") or "",
+        "options": asked.get("options") or [],
+        "draft": _draft(values),
+        "lastRun": last_run,
+    }
+
+
+def _settle_later(user_id: str, novel_id: str, status: str) -> None:
+    """把收尾那笔写库派出去，不让它拖住或拖垮这一条流。
+
+    生成器被取消（客户端断开、服务端超时）时 finally 里再 await 会立刻重抛，写不进去 ——
+    那正是最需要记下"这一轮断了"的时候。所以单独派个任务，数据从参数带过去，不依赖被取消的栈。
+    """
+    task = asyncio.create_task(mark_settled(user_id, novel_id, status), name="novel-run-settle")
+    _settle_tasks.add(task)
+    task.add_done_callback(_settle_tasks.discard)
 
 
 def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input) -> StreamingResponse:
     """把一轮图跑成 SSE。
 
-    事件：session / stage / prose_start / token / question / final / error / done。
+    事件：session / stage / target / prose_start / token / question / final / error / done。
     prose_start 表示"正文从头开始"（回炉重写也发一次，前端据此清空临时框），token 只出现在
-    prose_start 之后、内容全是正文。
+    prose_start 之后、内容全是正文。target 是 resolve 定下的这一轮要落哪一章，在第一个 token
+    之前发 —— 前端据它给在流的稿定归属，不再拿"发请求时开着的那一章"去猜。
 
     **必须 subgraphs=True**：writer / editor 是编译好的子图，langgraph 在 subgraphs=False 时
     直接丢掉子图里模型的 token（pregel/_messages.py 的 on_chat_model_start），正文会一个字都
     流不出来。代价是事件的形状变成三元组 (ns, mode, data)，ns 是所在的子图路径。
 
     三条流各司其职：messages 出正文 token，tasks 出状态行（任务开跑就报），updates 接
-    interrupt（只有它接得到）。
+    interrupt（只有它接得到）与 target（只有它发得出来）。
     """
     config = _config(user_id, novel_id, chapter_id)
 
     async def event_stream():
         yield _event("session", {"threadId": novel_id})
         prose = ProseFilter()
-        question = ""
+        prose_ns = ""   # 当前这条模型消息的来路，用来认出"换了一条消息"（见下面那处注释）
+        question = {}   # updates 流里接到的那个问题（{text, options}），另见 _final_payload
+        settled = DONE  # 这一轮到哪儿收的尾：awaiting 停在等答复，done 是正常跑完
+        finished = False
         try:
+            # 开跑先盖章：断开时提示"上一轮中断了"认这个标记。章号先留空 —— 请求带上来的
+            # chapter_id 只是"用户开着的那一章"，它可能压根不在这一轮要动的地方（闲聊那一路
+            # 连 load / resolve 都不走），拿它去挡 409 会误伤人。真正要落的那一章等 resolve
+            # 定下来再盖（见下面 target 那一处），write_next 的目标章还没落库、id 为空，正是
+            # "这一章谁都还没在写"该有的样子。
+            await mark_running(user_id, novel_id, "")
             async for ns, mode, data in novel_agent.astream(
                 graph_input,
                 config,
@@ -228,8 +465,13 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input) -> Stream
                     # 只有 writer / editor 的 token 是正文；其余节点（reader、summarize）
                     # 的模型本来就关了流式，这里是第二道保险。
                     if _owner(metadata) in ("writer", "editor"):
-                        for name, payload in prose.feed(_chunk_text(chunk)):
+                        # 每调一次模型都是新的一条消息：checkpoint_ns 末段是这一步的任务 id，
+                        # 一次模型调用一个。得跟筛子说一声 —— 动笔前的寒暄单独成条，跟交稿那条
+                        # 之间没有换行，粘在一个 buf 里行首的「【正文】」就认不出来了。
+                        run = str((metadata or {}).get("langgraph_checkpoint_ns") or "")
+                        for name, payload in prose.feed(_chunk_text(chunk), run != prose_ns):
                             yield _event(name, payload)
+                        prose_ns = run
                 elif mode == "tasks":
                     # 状态行在任务**开跑**时报。带 triggers 的是开始事件，带 result 的是结束。
                     # 子图内部的任务不报（ns 非空，那些是 prepare / write / model），
@@ -243,10 +485,24 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input) -> Stream
                             # interrupt 只从这条流里接得到（快照的 tasks[].interrupts 是空的）
                             if not question:
                                 for item in update or ():
-                                    if getattr(item, "value", None):
-                                        question = str(item.value)
+                                    asked = _question(getattr(item, "value", None))
+                                    if asked["text"] or asked["options"]:
+                                        question = asked
                                         break
                             continue
+                        # 这一轮要落哪一章：resolve 跑完立刻发，早于 writer 的第一个 token。
+                        if not ns and node == "resolve":
+                            target = (update or {}).get("target")
+                            if target:
+                                # 章号改认真正要落的那一章：手改撞车时挡 409 就认它。write_next
+                                # 若目标章还没落库（id 为空）就没人被挡 —— 那时用户在改的是别的章。
+                                await mark_running(
+                                    user_id,
+                                    novel_id,
+                                    str(target.get("chapterId") or ""),
+                                    "edit" if target.get("kind") == "edit" else "write",
+                                )
+                                yield _event("target", target)
                         # 状态行兜底那一道：父图节点跑完再报一次同样的文案（tasks 那条流已经
                         # 在开跑时报过了，文字一模一样，前端换一遍而已）。子图内部的不报。
                         if not ns and (text := _STAGE_TEXT.get(node)):
@@ -256,16 +512,48 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input) -> Stream
                 yield _event(name, payload)
 
             # 停下来的问题：流里接到的与快照里的互为备份，谁有用谁。
-            final = await _final_payload(user_id, novel_id, chapter_id)
-            if not final.get("interrupted") and question:
-                final = {"interrupted": True, "question": question}
+            final = await _final_payload(user_id, novel_id, chapter_id, question)
             if final.get("interrupted"):
-                yield _event("question", {"text": final.get("question") or question})
+                yield _event("question", {
+                    "text": final.get("question") or "",
+                    "options": final.get("options") or [],
+                    # 这一稿还没落库：前端据它重建临时框（刷新后也照这条路恢复）。
+                    "draft": final.get("draft") or {},
+                    # 这一问前面还垫着一句助手的回话（用户问了一句、由 chat 答了）：前端得补成
+                    # 一条气泡，否则他只见问题不见答复。水合那一路靠 /history，这里给空串。
+                    "reply": final.get("reply") or "",
+                })
+                settled = AWAITING
             else:
                 yield _event("final", final)
             yield _event("done", {})
+            finished = True
         except Exception as e:  # 流已经开了，只能把错误当一条事件发出去
             yield _event("error", {"message": str(e)})
+        finally:
+            # 没走到 done 就是这一轮没跑完（断开 / 出错）—— 记成 cancelled，用户下次进来才知道。
+            _settle_later(user_id, novel_id, settled if finished else CANCELLED)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+def _sse_pending(novel_id: str, pending: dict) -> StreamingResponse:
+    """/run 被"上一稿还没确认"挡回来时，就把那件事当成一轮跑完发出去。
+
+    形状跟正常跑一轮停在确认上一模一样（session → question → done），前端不必为这条路再写
+    一套处理。
+    """
+    async def event_stream():
+        yield _event("session", {"threadId": novel_id})
+        yield _event("question", {
+            "text": pending.get("text") or "",
+            "options": pending.get("options") or [],
+            "draft": pending.get("draft") or {},
+            # 空串：这一问是上一轮留下的，那轮的回话早随它自己那条 question 事件推过气泡了，
+            # 这里再推一遍就是两条（水合那一路同理，回话在 /history 里）。
+            "reply": "",
+        })
+        yield _event("done", {})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
@@ -276,22 +564,92 @@ async def call_novel_agent(
     novelId: str = Form(...),
     text: str = Form(...),
     chapterId: Optional[str] = Form(None),
+    inspirations: str = Form("[]"),
+    files: list[UploadFile] = File(default=[]),
 ):
     """把一句话交给小说图，流式跑这一轮；停在提问上就把问题交给前端。
 
     开书不走这里（那是弹窗专用的 api/novel/setup.py）：库里没有这本书时，load 会回一句
     引导用户去弹窗建。
+
+    上一稿还停在确认上就别往下跑：writer 一 save 就用整份 active_chapter 盖掉正文，拦在图里
+    已经晚了（拦在 intension 也一样晚）。所以守在这儿，把那个问题原样发回去。
+
+    用户挂上来的素材（inspirations 那份元信息 + files 那些上传件）在过了这道门禁之后落
+    novel_inspiration，再随 state 进图：能读成文字的进 writer / editor 的提示词，图片只存档。
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="至少说一句要写什么")
 
     user_id = str(request.state.user_id)
+    chapter_id = chapterId or ""
+    pending = await _pending(user_id, novelId, chapter_id)
+    if pending.get("pending"):
+        return _sse_pending(novelId, pending)
+
+    written = await add_inspirations(novelId, await _inspirations(inspirations, files))
     return _sse(
         user_id=user_id,
         novel_id=novelId,
-        chapter_id=chapterId or "",
-        graph_input={"user_id": user_id, "user_message": text},
+        chapter_id=chapter_id,
+        graph_input={
+            "user_id": user_id,
+            "user_message": text,
+            "inspirations": written,
+        },
     )
+
+
+@router.get("/pending")
+async def pending_novel_agent(
+    request: Request,
+    novelId: str = Query(...),
+    chapterId: Optional[str] = Query(None),
+):
+    """这本书此刻有没有一份交了、还没确认落库的稿。
+
+    前端刷新 / 切书时拿它重建现场：问题、按钮、临时框三样都在返回里（pending 为假时只有
+    这一个键）。/resume 是这个问题的正经去路，别拿这道守卫去挡它。
+    """
+    return await _pending(str(request.state.user_id), novelId, chapterId or "")
+
+
+@router.get("/history")
+async def history_novel_agent(request: Request, novelId: str = Query(...)):
+    """这本书的对话历史：前端进页面 / 切回这本书时拿它把对话栏重建回来。
+
+    对话只存在于 checkpoint 里（前端手上那份是内存里的，刷新就没了），所以恢复只能问这儿。
+    一个 thread 就是一本小说，所以只有 novelId 一个参数 —— 对话整本一条，切章不换会话。
+    """
+    values = _snapshot_values(
+        await novel_agent.aget_state(_config(str(request.state.user_id), novelId))
+    )
+    return _history(values)
+
+
+@router.post("/clear")
+async def clear_novel_agent(request: Request, novelId: str = Form(...)):
+    """清空这本书的对话记忆（用户点了"清空对话"）。
+
+    对话只活在 checkpoint 里，光清前端那几条气泡是假的 —— 一刷新又原样回来。这里把 messages
+    与长期摘要一起清掉：agent 从此不记得之前聊过什么，用户看到的也就是空的。库里的章节与
+    设定一个字不动（对话本来就不在库里）。
+
+    正停在提问上（有一稿等着确认）时不给清：改状态会把这轮的 interrupt 从快照上抹掉 ——
+    /pending 认不出它、/run 那道门禁也就不挡了，那份还没落库的正文再没人看得见（resume 本身
+    还接着跑，等于把用户悬在半空）。所以先让他把那一稿收下或改完再清。
+    """
+    config = _config(str(request.state.user_id), novelId)
+    if _snapshot_values(await novel_agent.aget_state(config)).get("__interrupt__"):
+        raise HTTPException(
+            status_code=409, detail="有一稿还没确认落库，先把它收下或改完再清空对话。"
+        )
+
+    await novel_agent.aupdate_state(
+        config,
+        {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)], "chat_summary": ""},
+    )
+    return {"cleared": True}
 
 
 @router.post("/resume")

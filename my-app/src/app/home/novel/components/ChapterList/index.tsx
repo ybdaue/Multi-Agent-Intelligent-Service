@@ -19,6 +19,7 @@ import {
   type Chapter,
   type ChapterStatus,
   type Novel,
+  type NovelMetaField,
 } from "../types";
 import styles from "./index.module.scss";
 
@@ -39,13 +40,17 @@ interface ChapterListProps {
   showActions: boolean;
   /** 已经有一个还没落库的章挡着：不给再建，等它写完、用户确认之后才放行 */
   createBlocked: boolean;
+  /** 交了稿、正等用户确认的那一章（落库之前它只挂在这儿，书架里根本没有它） */
+  awaitingChapterId: string | null;
   onSelectChapter: (id: string) => void;
   onCreateChapter: () => void;
-  onRenameChapter: (id: string, title: string) => void;
+  onRenameChapter: (chapter: Chapter, title: string) => void;
   onDeleteChapter: (chapter: Chapter) => void;
   onChangeStatus: (chapter: Chapter, status: ChapterStatus) => void;
   /** 看这一章的台账：用到、新造了哪些设定 */
   onShowLedger: (chapter: Chapter) => void;
+  /** 改这本书的类型 / 文风（头顶那行就地改，书名在左侧小说栏改） */
+  onEditMeta: (field: NovelMetaField, value: string) => void;
 }
 
 /** 章节栏折起来时条目上只留章节号（"第12章 风起" → "第12章"）；完整标题进悬浮提示 */
@@ -60,14 +65,18 @@ export default function ChapterList({
   onToggleCollapse,
   showActions,
   createBlocked,
+  awaitingChapterId,
   onSelectChapter,
   onCreateChapter,
   onRenameChapter,
   onDeleteChapter,
   onChangeStatus,
   onShowLedger,
+  onEditMeta,
 }: ChapterListProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
+  /** 头顶那行正在改哪一项（tropes / style），null 表示没在改 */
+  const [editingMeta, setEditingMeta] = useState<NovelMetaField | null>(null);
 
   const stopEditing = (id: string) => {
     setEditingId((prev) => (prev === id ? null : prev));
@@ -92,6 +101,38 @@ export default function ChapterList({
         )}
       </div>
 
+      {/* 这本书自己那几项：字数只读（后端按章节 SUM），类型 / 文风点一下就地改 */}
+      {!collapsed && novel && (
+        <div className={styles.meta}>
+          共 {novel.wordCount} 字 ·{" "}
+          <EditableTitle
+            value={novel.tropes}
+            displayValue={novel.tropes || "未填类型"}
+            editing={editingMeta === "tropes"}
+            className={styles.metaValue}
+            onClick={() => setEditingMeta("tropes")}
+            onCommit={(next) => {
+              onEditMeta("tropes", next);
+              setEditingMeta(null);
+            }}
+            onCancel={() => setEditingMeta(null)}
+          />
+          {" · "}
+          <EditableTitle
+            value={novel.style}
+            displayValue={novel.style || "未填文风"}
+            editing={editingMeta === "style"}
+            className={styles.metaValue}
+            onClick={() => setEditingMeta("style")}
+            onCommit={(next) => {
+              onEditMeta("style", next);
+              setEditingMeta(null);
+            }}
+            onCancel={() => setEditingMeta(null)}
+          />
+        </div>
+      )}
+
       <div className={styles.chapterList}>
         {!novel ? (
           <div className={styles.empty}>请先在左侧选择小说</div>
@@ -112,13 +153,25 @@ export default function ChapterList({
               >
                 {!collapsed &&
                   (temp ? (
-                    <span className={styles.tempTag}>临时</span>
+                    // 待确认的稿也还没落库，但它不是"用户随手建的临时章"——它是写完了在等人点头，
+                    // 所以标得醒目一点，用户才不会忘了确认、让这一章一直进不了书架
+                    <span
+                      className={`${styles.tempTag} ${
+                        chapter.id === awaitingChapterId ? styles.awaitingTag : ""
+                      }`}
+                    >
+                      {chapter.id === awaitingChapterId ? "待确认" : "临时"}
+                    </span>
                   ) : (
                     <Icon
                       className={`${styles.statusIcon} ${styles[cls]}`}
                       title={CHAPTER_STATUS_LABEL[chapter.status]}
                     />
                   ))}
+                {/* 改既有章那一稿也一样等着确认：章在库里，但这一稿还没定下来 */}
+                {!collapsed && !temp && chapter.id === awaitingChapterId && (
+                  <span className={`${styles.tempTag} ${styles.awaitingTag}`}>待确认</span>
+                )}
                 {showActions && !temp && (
                   <ChapterStatusSelect
                     compact
@@ -132,7 +185,7 @@ export default function ChapterList({
                   editing={editingId === chapter.id}
                   className={styles.itemTitle}
                   onCommit={(next) => {
-                    onRenameChapter(chapter.id, next);
+                    onRenameChapter(chapter, next);
                     stopEditing(chapter.id);
                   }}
                   onCancel={() => stopEditing(chapter.id)}

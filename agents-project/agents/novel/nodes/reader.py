@@ -1,39 +1,43 @@
-"""审稿：查档 → 出题 → 核验 → 收结论，四步一条线。
+"""审稿：查档 → 核验 → 收结论，三步一条线。
 
-先按 writer 报的台账把相关设定的原始档案取回来，拿档案出一份"必须核验"的问题清单，
-再让审查 agent 对着正文答这份清单、顺带把六类硬伤过一遍，最后 save 解析成 chapter_review。
-档案是事实底座、问题清单是注意力锚，两样都给；判词真假与回炉还是落库由图边定。
+先按 writer 报的台账把相关设定的原始档案取回来，再让审查 agent 对着正文查六类硬伤、
+顺带跟库里的档案对一遍，最后 save 解析成 chapter_review。
+档案是事实底座，审查员的 prompt 会先自问自答再交结论；判词真假与回炉还是落库由图边定。
+同一趟里还要对着用户这一轮的原话查一遍：他要的写法跟库里记的对不上就记进
+chapter_conflicts（那不是硬伤，是交用户定夺的一件事），父图 confirm_chapter 拿它问用户。
 认「本轮新交稿」用 chapter_id 空不空（与 update 同口径）；子图对话不上交父图。
 """
-from typing import Annotated, TypedDict
+from typing import Annotated, List, TypedDict
 
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from agents.utils.models import parse_json_value
-from ..state import ChapterMeta, ChapterReview, NovelMeta
+from ..state import ChapterConflict, ChapterMeta, ChapterReview, NovelMeta
 from ..tools import fetchDB, read_skill_file
 from ..utils.chapter_information import get_writer_context
 from ..utils.ledger import fetch_ref_facts
 from ..utils.model import MainModel
 from ..utils.novel_information import render_protagonists
-from ..utils.prompt import QUIZ_PROMPT, READER_PROMPT
+from ..utils.prompt import READER_PROMPT
+from ..utils.trace import traced
 
 
 class ReaderInput(TypedDict):
-    """父图传进来的：小说设定、这一轮 writer 刚交的这一章（台账在里面）。"""
-
     novel: NovelMeta
     active_chapter: ChapterMeta
+    user_message: str
+    writer_context: dict                # resolve 预查的上下文，gather 复用跳过查库
 
 
 class ReaderOutput(TypedDict):
-    """交回父图的：这一稿的审查结论。子图自己的材料与对话不上交。"""
+    """交回父图的：这一稿的审查结论，和用户要求跟库里对不上的那几处。子图的材料与对话不上交。"""
 
     chapter_review: ChapterReview
+    chapter_conflicts: List[ChapterConflict]
 
 
 class _Chat(TypedDict, total=False):
@@ -45,15 +49,14 @@ class _Chat(TypedDict, total=False):
 class ReaderState(TypedDict, total=False):
     novel: NovelMeta
     active_chapter: ChapterMeta
-    materials: str                # gather 备好的设定与前文（不含正文与摘要，那两样在 check 里现摆）
+    user_message: str
+    materials: str                # gather 备好的设定与前文
     facts: str                    # 台账指向的那些行现在的档案
-    questions: str                # quiz 出的问题清单
     report: str                   # check 交上来的原始判词
     chapter_review: ChapterReview
+    chapter_conflicts: List[ChapterConflict]
+    writer_context: dict          # resolve 预查的上下文，gather 复用跳过查库
 
-
-# 出题这一趟材料都在消息里，没有要查的东西，直接调模型就完。
-_quizModel = MainModel(temperature=0.1, disable_streaming=True)
 
 # 审查要稳定判断，temperature 比 writer 低；不挂 run_skill_script（只读文档）、
 # 不挂"交结论"工具（判词就是模型的回复，收结论是 save 的事）。
@@ -67,6 +70,14 @@ _reader_agent = create_agent(
 
 _PASSED: ChapterReview = {"passed": True, "problems": ""}
 
+# 冲突记的是"用户要的偏离了库里哪一类东西"。取值照 my-app/prisma/schema/novel.prisma 的
+# ImpactTarget 抄，进库要按它查；认不出来的（模型写了中文、或写了 novel 这种不可能是冲突
+# 对象的）一律不收 —— 收下来落库时枚举不过，整笔事务都会回滚。
+_CONFLICT_TYPES = frozenset({
+    "outline", "world_rule", "character", "faction", "item",
+    "timeline", "chronicle", "foreshadowing",
+})
+
 
 def _last_reply(messages) -> str:
     """最后一条没有工具调用的助手回复 —— 审查结论就是它。"""
@@ -78,19 +89,49 @@ def _last_reply(messages) -> str:
     return ""
 
 
-def _verdict(text: str) -> ChapterReview:
-    """把模型那段 JSON 解析成 chapter_review。解析不出来、形状不对，一律当通过。"""
+def _parsed(text: str) -> dict:
+    """模型那段判词 JSON。解析不出来、不是个对象，都交空 dict，后面的判定各自兜底。"""
     try:
         value = parse_json_value(text)
     except ValueError:
-        return dict(_PASSED)
-    if not isinstance(value, dict) or not isinstance(value.get("passed"), bool):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _verdict(value: dict) -> ChapterReview:
+    """从判词里取结论。passed 不是布尔就当通过 —— 卡死整轮比放过一章糟。"""
+    if not isinstance(value.get("passed"), bool):
         return dict(_PASSED)
     problems = value.get("problems")
     return {
         "passed": value["passed"],
         "problems": problems if isinstance(problems, str) else "",
     }
+
+
+def _conflicts(value: dict) -> List[ChapterConflict]:
+    """从判词里取"用户要的跟库里对不上"的条目。
+
+    只收认得出来的：类型得在白名单里，rule / want 得有一句能看的话。模型漏报、报歪都不耽误
+    这一轮 —— 顶多少记一条台账，用户该看到的审查结论照样在。
+    """
+    rows = value.get("conflicts")
+    if not isinstance(rows, list):
+        return []
+    out: List[ChapterConflict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        target_type = str(row.get("targetType") or "").strip()
+        if target_type not in _CONFLICT_TYPES:
+            continue
+        out.append({
+            "targetType": target_type,
+            "targetName": str(row.get("targetName") or "").strip(),
+            "rule": str(row.get("rule") or "").strip(),
+            "want": str(row.get("want") or "").strip(),
+        })
+    return out
 
 
 def _materials(state: ReaderState, context: dict) -> str:
@@ -149,26 +190,8 @@ def _materials(state: ReaderState, context: dict) -> str:
     return "\n\n".join(lines)
 
 
-def _quiz_briefing(state: ReaderState, facts: str) -> str:
-    """交给命题 agent 的：这一章是第几章、大概讲了什么，和要照着出题的档案。"""
-    chapter = state.get("active_chapter") or {}
-    order = chapter.get("chapter_order")
-    title = chapter.get("chapter_title") or "未命名"
-    lines = [f"请为第 {order} 章《{title}》出要核验的问题。"]
-
-    summary = (chapter.get("chapter_summary") or "").strip()
-    if summary:
-        lines.append(f"本章摘要（只给你判断哪些档案该出题，正文不给）：\n\n{summary}")
-
-    lines.append(f"本章涉及的设定在库里的档案：\n\n{facts}")
-    return "\n\n".join(lines)
-
-
-def _check_briefing(state: ReaderState, materials: str, facts: str, questions: str) -> str:
-    """交给审查 agent 的：消息头、正文摘要、前文与设定、本章涉及设定的档案、问题清单、正文全文。
-
-    档案与问题两样都给：档案是事实底座，问题是逼它一条条答的重点。
-    """
+def _check_briefing(state: ReaderState, materials: str, facts: str) -> str:
+    """交给审查 agent 的：设定与前文、档案（含自问自答素材）、正文全文。"""
     chapter = state.get("active_chapter") or {}
     order = chapter.get("chapter_order")
     title = chapter.get("chapter_title") or "未命名"
@@ -178,6 +201,10 @@ def _check_briefing(state: ReaderState, materials: str, facts: str, questions: s
     if summary:
         lines.append(f"本章摘要：\n\n{summary}")
 
+    said = (state.get("user_message") or "").strip()
+    if said:
+        lines.append(f"用户对这一章的要求（他明确要的写法，可能跟下面库里的设定对不上）：\n\n{said}")
+
     lines.append(materials)
 
     if facts.strip():
@@ -185,9 +212,6 @@ def _check_briefing(state: ReaderState, materials: str, facts: str, questions: s
             "本章涉及的那些设定在库里的原始档案（库里现在的原样，不是正文里的说法）：\n\n"
             f"{facts.strip()}"
         )
-
-    if questions.strip():
-        lines.append(f"必须核验的问题（一条一条就着正文回答）：\n\n{questions.strip()}")
 
     lines.append(f"要审的这一章正文全文如下：\n\n{chapter.get('chapter_content') or ''}")
     lines.append(
@@ -198,53 +222,31 @@ def _check_briefing(state: ReaderState, materials: str, facts: str, questions: s
 
 
 async def gather(state: ReaderState, config: RunnableConfig) -> dict:
-    """备材料：前文与设定从 get_writer_context 一次取回，台账指向的档案按 refId 从库里取。
-
-    守卫也在这儿 —— 没新稿、拿不到书号就直接把结论写成「通过」，后面三步都不跑。
-    """
+    """备材料：复用 resolve 缓存的 writer_context，台账指向的档案按 refId 从库里取。"""
     chapter = state.get("active_chapter") or {}
-    # chapter_id 非空 = 这一章已落过库，state 里那份是上一轮的遗留，不是本轮交的稿。
     if not chapter.get("chapter_content") or chapter.get("chapter_id"):
         return {"chapter_review": dict(_PASSED)}
 
     novel_id = (config.get("configurable") or {}).get("novel_id")
     if not novel_id:
-        # 拿不到书号就取不回前文和大纲，审不出名堂，放行让 update 去落库。
         return {"chapter_review": dict(_PASSED)}
 
-    # 显式给序号，不靠"下一章"去推：改既有章节时这一章早就在库里，按下一章算会把要审的这章
-    # 自己当成"上一章"。
-    context = await get_writer_context(novel_id, chapter.get("chapter_order"))
+    context = state.get("writer_context") or await get_writer_context(
+        novel_id, chapter.get("chapter_order")
+    )
     facts = await fetch_ref_facts(novel_id, chapter.get("chapter_refs"))
     return {"materials": _materials(state, context), "facts": facts}
 
 
 def _route_after_gather(state: ReaderState) -> str:
-    """gather 之后的去路：守卫拦下的（结论已经写好）收工，查得出档案的先出题，否则直接核验。"""
+    """gather 之后的去路：守卫拦下的收工，有档案先查，否则直接核验。"""
     if state.get("chapter_review"):
         return "done"
-    return "quiz" if (state.get("facts") or "").strip() else "check"
-
-
-def _no_questions(text: str) -> bool:
-    """命题 agent 出不了题时的回话（提示词里约定的「无」），别当成一条问题甩给审查。"""
-    return " ".join((text or "").split()).strip("。.！!：:") == "无"
-
-
-async def quiz(state: ReaderState, config: RunnableConfig) -> dict:
-    """对着查回来的档案出一份问题清单。"""
-    reply = await _quizModel.ainvoke(
-        [
-            SystemMessage(content=QUIZ_PROMPT),
-            HumanMessage(content=_quiz_briefing(state, state.get("facts") or "")),
-        ]
-    )
-    questions = reply.content if isinstance(reply.content, str) else ""
-    return {"questions": "" if _no_questions(questions) else questions.strip()}
+    return "check"
 
 
 async def check(state: ReaderState, config: RunnableConfig) -> dict:
-    """答问题清单 + 过六类硬伤，交回原始判词。"""
+    """过六类硬伤 + 对照档案自问自答，交回原始判词。"""
     result = await _reader_agent.ainvoke(
         {
             "messages": [
@@ -253,7 +255,6 @@ async def check(state: ReaderState, config: RunnableConfig) -> dict:
                         state,
                         state.get("materials") or "",
                         state.get("facts") or "",
-                        state.get("questions") or "",
                     )
                 )
             ]
@@ -265,22 +266,22 @@ async def check(state: ReaderState, config: RunnableConfig) -> dict:
 
 def save(state: ReaderState, config: RunnableConfig) -> dict:
     """收结论：判词在这儿解析。解析不出来按通过 —— 卡死整轮比放过一章糟。"""
-    return {"chapter_review": _verdict(state.get("report") or "")}
+    value = _parsed(state.get("report") or "")
+    return {"chapter_review": _verdict(value), "chapter_conflicts": _conflicts(value)}
 
 
+# 进出一行人话打印（agents/novel/utils/trace.py），只管调式，不动流程。
 _reader_flow = StateGraph(ReaderState, input_schema=ReaderInput, output_schema=ReaderOutput)
-_reader_flow.add_node("gather", gather)
-_reader_flow.add_node("quiz", quiz)
-_reader_flow.add_node("check", check)
-_reader_flow.add_node("save", save)
+_reader_flow.add_node("gather", traced("reader.gather")(gather))
+_reader_flow.add_node("check", traced("reader.check")(check))
+_reader_flow.add_node("save", traced("reader.save")(save))
 _reader_flow.add_edge(START, "gather")
-# gather 自己定去路（守卫拦下 / 没档案可查 / 正常出题），三条路都在图里。
+# gather 自己定去路（守卫拦下 / 正常核验），两条路都在图里。
 _reader_flow.add_conditional_edges(
     "gather",
     _route_after_gather,
-    {"quiz": "quiz", "check": "check", "done": END},
+    {"check": "check", "done": END},
 )
-_reader_flow.add_edge("quiz", "check")
 _reader_flow.add_edge("check", "save")
 _reader_flow.add_edge("save", END)
 

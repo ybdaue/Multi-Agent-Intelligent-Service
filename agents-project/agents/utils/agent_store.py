@@ -94,13 +94,12 @@ class PostgresStore(BaseStore):
     async def _aget(self, conn, op: GetOp) -> Item | None:
         user = _user_from_namespace(op.namespace)
         fq = _fq_key(op.namespace, op.key)
-        row = (
-            await conn.execute(
-                'SELECT key, value, "createdAt", "updatedAt" FROM agent_store '
-                'WHERE "userId" = %s AND "agentName" = %s AND key = %s',
-                [user, self.agent_name, fq],
-            )
-        ).fetchone()
+        cur = await conn.execute(
+            'SELECT key, value, "createdAt", "updatedAt" FROM agent_store '
+            'WHERE "userId" = %s AND "agentName" = %s AND key = %s',
+            [user, self.agent_name, fq],
+        )
+        row = await cur.fetchone()
         return self._row_to_item(row, op.namespace, op.key) if row else None
 
     async def _aput(self, conn, op: PutOp) -> None:
@@ -121,7 +120,7 @@ class PostgresStore(BaseStore):
             ) from exc
         await conn.execute(
             'INSERT INTO agent_store (id, "userId", "agentName", key, value, "createdAt", "updatedAt") '
-            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, now(), now()) "
+            "VALUES (%s, %s, %s, %s, %s::jsonb, now(), now()) "
             'ON CONFLICT ("userId", "agentName", key) '
             "DO UPDATE SET value = EXCLUDED.value, \"updatedAt\" = now()",
             [uuid.uuid4().hex, user, self.agent_name, fq, value_json],
@@ -130,13 +129,12 @@ class PostgresStore(BaseStore):
     async def _asearch(self, conn, op: SearchOp) -> list[SearchItem]:
         prefix = "/".join(op.namespace_prefix) + ("/" if op.namespace_prefix else "")
         like = prefix + "%"
-        rows = (
-            await conn.execute(
-                'SELECT key, value, "createdAt", "updatedAt" FROM agent_store '
-                'WHERE "agentName" = %s AND key LIKE %s ORDER BY key',
-                [self.agent_name, like],
-            )
-        ).fetchall()
+        cur = await conn.execute(
+            'SELECT key, value, "createdAt", "updatedAt" FROM agent_store '
+            'WHERE "agentName" = %s AND key LIKE %s ORDER BY key',
+            [self.agent_name, like],
+        )
+        rows = await cur.fetchall()
         items: list[SearchItem] = []
         for row in rows:
             value = row[1]
@@ -210,7 +208,7 @@ class PostgresStore(BaseStore):
             ) from exc
         conn.execute(
             'INSERT INTO agent_store (id, "userId", "agentName", key, value, "createdAt", "updatedAt") '
-            "VALUES (%s, %s, %s, %s, %s, %s::jsonb, now(), now()) "
+            "VALUES (%s, %s, %s, %s, %s::jsonb, now(), now()) "
             'ON CONFLICT ("userId", "agentName", key) '
             "DO UPDATE SET value = EXCLUDED.value, \"updatedAt\" = now()",
             [uuid.uuid4().hex, user, self.agent_name, fq, value_json],

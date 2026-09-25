@@ -26,15 +26,13 @@ export default function ServiceCard({ service }: Props) {
 
   const content = (
     <div className={`${styles.card} ${service.comingSoon ? styles.comingSoon : styles.active}`}>
-      <div className={styles.head}>
-        <div className={styles.icon}>{service.icon}</div>
-        <h3 className={`${styles.title} ${service.comingSoon ? styles.comingSoonTitle : styles.activeTitle}`}>
-          {service.title}
-          {service.comingSoon && (
-            <span className={styles.badge}>即将上线</span>
-          )}
-        </h3>
-      </div>
+      <div className={styles.icon}>{service.icon}</div>
+      <h3 className={`${styles.title} ${service.comingSoon ? styles.comingSoonTitle : styles.activeTitle}`}>
+        {service.title}
+        {service.comingSoon && (
+          <span className={styles.badge}>即将上线</span>
+        )}
+      </h3>
       <p className={`${styles.description} ${service.comingSoon ? styles.comingSoonDesc : styles.activeDesc}`}>
         {service.description}
       </p>

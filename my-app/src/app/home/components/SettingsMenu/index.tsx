@@ -4,6 +4,7 @@ import { useState } from "react";
 import { signOut } from "@/lib/auth-clients";
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
+import ThemeToggle from "@/components/theme-toggle";
 import styles from "./index.module.scss";
 
 interface Props {
@@ -14,7 +15,7 @@ interface Props {
 export default function SettingsMenu({ userName, userEmail }: Props) {
   const router = useRouter();
   const [loggingOut, setLoggingOut] = useState(false);
-  const { theme, setTheme } = useTheme();
+  const { theme } = useTheme();
 
   async function handleLogout() {
     setLoggingOut(true);
@@ -33,13 +34,7 @@ export default function SettingsMenu({ userName, userEmail }: Props) {
         <span className={styles.themeLabel}>
           {theme === "dark" ? "深色模式" : "浅色模式"}
         </span>
-        <button
-          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          className={styles.toggle}
-          aria-label="切换主题"
-        >
-          <span className={`${styles.toggleKnob} ${theme === "dark" ? styles.dark : ""}`} />
-        </button>
+        <ThemeToggle variant="switch" />
       </div>
 
       <div className={styles.divider}>

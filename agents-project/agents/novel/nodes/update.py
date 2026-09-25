@@ -11,6 +11,7 @@ from langchain_core.runnables import RunnableConfig
 from ..state import State
 from ..utils.chapter_information import count_chapter_words, upsert_chapter
 from ..utils.impact import write_edits
+from ..utils.inspiration import mark_used
 
 
 async def update(state: State, config: RunnableConfig) -> dict:
@@ -18,12 +19,15 @@ async def update(state: State, config: RunnableConfig) -> dict:
     # 收尾时一律带上：闲聊、没改成的稿这些不写章节的路也要把记号清干净。
     fresh = {
         "chapter_review": {},
+        "chapter_conflicts": [],
         "chapter_attempt": 0,
         "edit_feedback": "",
         "edit_note": "",
         "setting_changes": [],
         "change_impact": [],
         "target_chapter": {},
+        # 素材已经在 /run 落库了，这里只清本轮记号；哪几章用了哪几条由下面 mark_used 补。
+        "inspirations": [],
     }
     # 回话攒成一条：前端只拿最后一条助手消息。
     lines = []
@@ -56,6 +60,9 @@ async def update(state: State, config: RunnableConfig) -> dict:
         # 字数重算一遍再落，不采信交稿时的那个数。
         chapter["chapter_word_count"] = count_chapter_words(chapter["chapter_content"])
         chapter_id, _ = await upsert_chapter(novel_id, chapter)
+
+        # 这一章的正文用了这一轮带的素材：记进那几条的 usedChapterIds，将来翻素材库看得到。
+        await mark_used([item["id"] for item in state.get("inspirations") or [] if item.get("id")], chapter_id)
 
         # 改既有章节和写新章用词不一样：用户这一轮要的是"改"，回他"已写好"像答错了。
         verb = "已改好" if state.get("intension") == "edit" else "已写好"

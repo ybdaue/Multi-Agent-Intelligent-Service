@@ -33,6 +33,13 @@ _MARK = re.compile(r"[ \t>*#-]*" + re.escape(MARK) + r"[ \t*]*")
 PROSE_MARK = "【正文】"
 _PROSE = re.compile(r"^[ \t>*#-]*" + re.escape(PROSE_MARK) + r"[ \t*]*", re.M)
 
+# 紧跟在标记后面的那行标题（`# 第X章 标题`）：它单独存 novel_chapter.title，正文里不留 ——
+# 页面上标题栏与正文区都在，正文里再留一份就是同一句话显示两遍。落库
+# （chapter_information.split_title）与流式层（api/novel/stream.py）共用这一条规则，
+# 两边摘掉的必须是同一行，不然用户看到的与存进库的又对不上了。
+# 行首的 # 不带缩进、行里带「章」，与 count_chapter_words 的口径一致。
+TITLE_LINE = re.compile(r"^#{1,6}[ \t]*([^\n]*章[^\n]*?)[ \t]*$", re.M)
+
 # refType → 目标表。RefType 枚举的全部九个取值，枚举列写不进去的值在这里就被筛掉。
 REF_TABLES = {
     "character": "novel_character",
@@ -166,6 +173,57 @@ FACT_SKIP_COLUMNS = ("status",)
 # 单个字段、整份档案的上限：截太狠审不出东西，不封顶会把正文挤出上下文。
 MAX_FACT_CELL_CHARS = 400
 MAX_FACTS_CHARS = 8_000
+
+# 正文扫名补漏：只扫名字够短的几类（大纲内容片段在正文里必撞，不扫）。
+ENTITY_SCAN_TYPES = frozenset({"character", "faction", "item", "world_rule", "timeline", "chronicle"})
+_MIN_NAME_LEN = 2
+_MAX_NAME_LEN = 20
+
+
+async def fetch_names(novel_id: str) -> list[tuple[str, str, str]]:
+    """取书里已有实体的 (refType, id, name)，只限 ENTITY_SCAN_TYPES 那六类。"""
+    from api.utils.db import pg_pool
+
+    sql = (
+        "SELECT 'character', id, name FROM novel_character "
+        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300'
+        " UNION ALL "
+        "SELECT 'faction', id, name FROM novel_faction "
+        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300'
+        " UNION ALL "
+        "SELECT 'item', id, name FROM novel_item "
+        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300'
+        " UNION ALL "
+        "SELECT 'world_rule', id, name FROM novel_world_rule "
+        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300'
+        " UNION ALL "
+        "SELECT 'timeline', id, title FROM novel_timeline "
+        'WHERE "novelId" = %s AND title IS NOT NULL AND title != \'\' ORDER BY "createdAt" LIMIT 300'
+        " UNION ALL "
+        "SELECT 'chronicle', id, title FROM novel_chronicle "
+        'WHERE "novelId" = %s AND title IS NOT NULL AND title != \'\' ORDER BY "createdAt" LIMIT 300'
+    )
+    async with pg_pool.connection() as conn:
+        cur = await conn.execute(sql, (novel_id,) * 6)
+        return await cur.fetchall()
+
+
+def auto_complete_refs(refs, prose: str, known_rows: list[tuple[str, str, str]]) -> list[dict]:
+    """从正文里扫出已有实体的名字，把台账漏报的那几条补进 refs。
+
+    refs 可以是 None（这一稿完全没给台账），此时按 [] 算 —— 新章没有旧关联要留；
+    正文里匹配到的补成 mention（最低戏份，不影响已有 ref 的 role）。
+    """
+    result = list(refs) if refs is not None else []
+    seen = {(r["refType"], r["refId"]) for r in result}
+    for ref_type, ref_id, label in known_rows:
+        name = str(label or "").strip()
+        if not name or len(name) < _MIN_NAME_LEN or len(name) > _MAX_NAME_LEN:
+            continue
+        if (ref_type, ref_id) not in seen and name in prose:
+            result.append({"refType": ref_type, "refId": ref_id, "role": "mention"})
+            seen.add((ref_type, ref_id))
+    return result
 
 
 def split_ledger(reply: str) -> tuple[str, str]:
