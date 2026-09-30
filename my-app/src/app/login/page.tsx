@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { signin } from "@/lib/server/login";
+import { checkBanned } from "@/lib/server/login/check-banned";
 import { getSession } from "@/lib/auth-clients";
 import ThemeToggle from "@/components/theme-toggle";
 import styles from "./index.module.scss";
@@ -51,14 +52,25 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
   const cardRef = useRef<HTMLDivElement>(null);
+
+  // 错误提示 2 秒后自动消失
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(""), 2000);
+    return () => clearTimeout(t);
+  }, [error]);
+
+  /** 登录成功后完整页面跳转，刷新根 layout 的 Header session */
+  function redirectAfterLogin() {
+    window.location.href = "/home";
+  }
 
   useEffect(() => {
     getSession().then(({ data }) => {
-      if (data?.session) router.replace("/home");
+      if (data?.session) redirectAfterLogin();
     }).catch(() => {});
-  }, [router]);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -66,13 +78,20 @@ export default function Login() {
     setLoading(true);
 
     try {
+      const { banned } = await checkBanned(email);
+      if (banned) {
+        setError("账号已被封禁，无法登录");
+        setLoading(false);
+        return;
+      }
+
       const res = await signin({ email, password });
       if (!res.success) {
         setError(res.error);
         setLoading(false);
         return;
       }
-      router.replace("/home");
+      redirectAfterLogin();
     } catch {
       setError("操作失败，请稍后重试");
     } finally {
@@ -167,6 +186,12 @@ export default function Login() {
                 {f.label}
               </div>
             ))}
+          </div>
+
+          <div className={styles.legal}>
+            <Link href="/terms">服务条款</Link>
+            <span className={styles.legalDot}>·</span>
+            <Link href="/privacy">隐私政策</Link>
           </div>
         </div>
       </div>

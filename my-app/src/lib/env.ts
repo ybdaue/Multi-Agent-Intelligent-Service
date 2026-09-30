@@ -6,7 +6,7 @@ const envSchema = z.object({
   NEXT_PUBLIC_API_URL: z.string().default("http://localhost:8080"),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   APIKEY: z.string().optional(),
-  TICKFLOW_KEY: z.string()
+  TICKFLOW_KEY: z.string(),
 });
 
 const parsed = envSchema.safeParse(process.env);

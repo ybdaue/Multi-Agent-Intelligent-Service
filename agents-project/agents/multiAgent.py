@@ -8,7 +8,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.graph import MessagesState
 from langgraph.prebuilt import ToolNode, InjectedState
-from agents.utils.models import MainModel
+from agents.utils.models import BackupMainModel, MainModel
 from .legal import legal_agent
 from .utils.boundMemory import BoundedMemorySaver
 from langchain_core.runnables import RunnableConfig
@@ -41,15 +41,21 @@ async def _execute_legal_agent(msg: str, file_source=None, config=None):
     user_id = configurable.get("userId")
     sub_thread_id = f"{parent_thread_id}_legal"
 
-    result = await legal_agent.ainvoke(
-        {
-            "messages": [HumanMessage(msg)],
-            "user_message": msg,
-            "file_source": file_source,
-            "userId": user_id,
-        },
-        {"configurable": {"thread_id": sub_thread_id, "userId": user_id}},
-    )
+    try:
+        result = await legal_agent.ainvoke(
+            {
+                "messages": [HumanMessage(msg)],
+                "user_message": msg,
+                "file_source": file_source,
+                "userId": user_id,
+            },
+            {"configurable": {"thread_id": sub_thread_id, "userId": user_id}},
+        )
+    except Exception as e:
+        print(f"[multiAgent] 法律子图调用失败: {e}")
+        return json.dumps({
+            "error": "法律分析服务暂时不可用，请稍后再试。",
+        }, ensure_ascii=False, default=str)
 
     # 只返回相关字段，避免全量 state 污染主智能体上下文
     return json.dumps({
@@ -208,6 +214,21 @@ llm_prompt="""
 
 # ===== Graph Nodes =====
 
+async def _stream_model(model_instance, messages, config):
+    """流式收集模型输出的 async generator，返回 (full_content, tool_call_chunks_acc, response_id)。"""
+    full_content = ""
+    tool_call_chunks_acc = []
+    response_id = None
+    async for chunk in model_instance.astream(messages, config):
+        if response_id is None and getattr(chunk, "id", None):
+            response_id = chunk.id
+        if isinstance(chunk.content, str) and chunk.content:
+            full_content += chunk.content
+        if chunk.tool_call_chunks:
+            tool_call_chunks_acc.extend(chunk.tool_call_chunks)
+    return full_content, tool_call_chunks_acc, response_id
+
+
 async def call_model(state, config: RunnableConfig):
     """异步调用 LLM，返回最终消息。
 
@@ -235,19 +256,21 @@ async def call_model(state, config: RunnableConfig):
             )
         messages.append(m)
 
-    full_content = ""
-    tool_call_chunks_acc = []
-    response_id = None
-
-    async for chunk in model.astream(messages, config):
-        # 记录模型响应 id，最终消息与 token 分片共享同一 id，用于流式去重
-        if response_id is None and getattr(chunk, "id", None):
-            response_id = chunk.id
-        if isinstance(chunk.content, str) and chunk.content:
-            full_content += chunk.content
-        # 收集 tool call 分片（最终组装成完整 tool_calls）
-        if chunk.tool_call_chunks:
-            tool_call_chunks_acc.extend(chunk.tool_call_chunks)
+    try:
+        full_content, tool_call_chunks_acc, response_id = await _stream_model(model, messages, config)
+    except Exception:
+        print("[multiAgent] 路由模型流式失败，尝试备用模型")
+        try:
+            full_content, tool_call_chunks_acc, response_id = await _stream_model(
+                _router_model_backup, messages, config
+            )
+        except Exception as exc:
+            print(f"[multiAgent] 备用路由模型也失败: {exc}")
+            return {
+                "messages": [
+                    AIMessage(content="抱歉，服务暂时不可用，请稍后再试。", id=str(uuid.uuid4()))
+                ]
+            }
 
     final_id = response_id or str(uuid.uuid4())
 
@@ -314,7 +337,15 @@ def process_legal_result(state):
 # ===== Build Graph =====
 
 tools = [use_legal_agent, use_finance_agent]
-model = MainModel().bind_tools(tools)
+try:
+    _router_model = MainModel(service_type="chat").bind_tools(tools)
+except Exception:
+    _router_model = None
+try:
+    _router_model_backup = BackupMainModel(service_type="chat").bind_tools(tools)
+except Exception:
+    _router_model_backup = None
+model = _router_model
 checkpointer = BoundedMemorySaver()
 tool_node = ToolNode(tools)
 

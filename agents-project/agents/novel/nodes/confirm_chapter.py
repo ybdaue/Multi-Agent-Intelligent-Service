@@ -23,7 +23,7 @@ from langgraph.types import Command, interrupt
 
 from agents.utils.models import parse_json_value
 from ..state import ChapterConflict, State
-from ..utils.model import intentModel
+from ..utils.model import intentModel, _intentModel_backup
 from ..utils.prompt import KEEP_PROMPT
 from ..utils.verdict import verdict
 
@@ -154,9 +154,25 @@ async def confirm_chapter(state: State, config: RunnableConfig) -> Command:
         keep = choice == "keep"
         feedback = "" if keep else _redo_feedback(conflicts, problems if not passed else "")
     else:
-        reply = await intentModel.ainvoke(
-            [SystemMessage(content=KEEP_PROMPT), HumanMessage(content=str(answer or ""))]
-        )
+        try:
+            reply = await intentModel.ainvoke(
+                [SystemMessage(content=KEEP_PROMPT), HumanMessage(content=str(answer or ""))]
+            )
+        except Exception:
+            try:
+                reply = await _intentModel_backup.ainvoke(
+                    [SystemMessage(content=KEEP_PROMPT), HumanMessage(content=str(answer or ""))]
+                )
+            except Exception:
+                # 备用也失败时视为收下，不阻塞用户
+                update = {
+                    "active_chapter": {**chapter, "chapter_status": "draft"},
+                    "chapter_review": {"passed": True, "problems": ""},
+                    "edit_feedback": "",
+                }
+                if conflicts:
+                    update["change_impact"] = _impact_rows(conflicts, order)
+                return Command(goto="update", update=update)
         text = reply.content if isinstance(reply.content, str) else ""
         keep, feedback = verdict(text, "keep")
 

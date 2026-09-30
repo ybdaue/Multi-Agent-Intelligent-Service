@@ -26,7 +26,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 
-from agents.utils.models import parse_json_value
+from agents.utils.models import ainvoke_with_fallback, parse_json_value
 from ..state import ChapterMeta, ChapterReview, ChapterTarget, NovelMeta, merge_chapter
 from ..tools import fetchDB, read_skill_file
 from ..utils.chapter_information import (
@@ -62,7 +62,7 @@ from ..utils.ledger import (
     parse_ledger,
     split_submission,
 )
-from ..utils.model import MainModel, intentModel
+from ..utils.model import BackupMainModel, MainModel, _intentModel_backup, intentModel
 from ..utils.prompt import APPROVE_PROMPT, EDIT_CHAPTER_PROMPT, EDIT_PLAN_PROMPT, SETTLE_PROMPT
 from ..utils.trace import traced
 from ..utils.verdict import verdict
@@ -118,14 +118,21 @@ class EditorState(TypedDict, total=False):
 
 
 # 计划与判词都是小提示词 + JSON 出参，不需要工具循环，直接调模型。temperature 要稳定判断。
-_editModel = MainModel(temperature=0.1, disable_streaming=True)
+try:
+    _editModel = MainModel(temperature=0.1, disable_streaming=True)
+    _editModel_backup = BackupMainModel(temperature=0.1, disable_streaming=True)
+    _revise_main = MainModel(temperature=0.7, disable_streaming=False)
+except Exception:
+    _editModel = None
+    _editModel_backup = None
+    _revise_main = None
 
 # 改稿照 writerSkill 写，挂跟 writer 一样的两件工具。问用户是 approve 的事，不挂工具；
 # 也不挂"交稿"工具（正文与台账就是模型的回复，切开与落 state 是 collect 的事）。
 # 开着流式：改出来的正文要逐字发给前端当打字机。台账由 api/novel/stream.py 的
 # ProseFilter 在【本章台账】处截掉（与 writer 共用同一套标记与规则）。
 _revise_agent = create_agent(
-    model=MainModel(temperature=0.7, disable_streaming=False),
+    model=_revise_main,
     tools=[read_skill_file, fetchDB],
     system_prompt=EDIT_CHAPTER_PROMPT,
     state_schema=EditorState,
@@ -336,9 +343,8 @@ def _conflict_text(said: int, order: int) -> str:
 
 async def plan(state: EditorState, config: RunnableConfig) -> dict:
     """读懂用户要改什么、改成什么；出不来计划就写一句回话，这一轮什么都不改。"""
-    reply = await _editModel.ainvoke(
-        [SystemMessage(content=EDIT_PLAN_PROMPT), HumanMessage(content=_plan_brief(state))]
-    )
+    reply = await ainvoke_with_fallback(_editModel, _editModel_backup, [
+        SystemMessage(content=EDIT_PLAN_PROMPT), HumanMessage(content=_plan_brief(state))])
     text = reply.content if isinstance(reply.content, str) else ""
     try:
         value = parse_json_value(text)
@@ -422,12 +428,9 @@ async def settle(state: EditorState, config: RunnableConfig) -> dict:
     target_type = str(plan.get("targetType") or "")
 
     entries = await list_entries(novel_id, target_type, str(plan.get("targetName") or "").strip())
-    reply = await _editModel.ainvoke(
-        [
-            SystemMessage(content=SETTLE_PROMPT),
-            HumanMessage(content=_settle_brief(state, plan, render_entries(target_type, entries))),
-        ]
-    )
+    reply = await ainvoke_with_fallback(_editModel, _editModel_backup, [
+        SystemMessage(content=SETTLE_PROMPT),
+        HumanMessage(content=_settle_brief(state, plan, render_entries(target_type, entries)))])
     text = reply.content if isinstance(reply.content, str) else ""
     try:
         value = parse_json_value(text)
@@ -622,9 +625,18 @@ async def approve(state: EditorState, config: RunnableConfig) -> dict:
         f"{state.get('approve_text') or ''}\n\n"
         "同意就说一声，我这就动手；要换一处改、或者要改成别的样子，直接说。"
     )
-    reply = await intentModel.ainvoke(
-        [SystemMessage(content=APPROVE_PROMPT), HumanMessage(content=str(answer))]
-    )
+    try:
+        reply = await intentModel.ainvoke(
+            [SystemMessage(content=APPROVE_PROMPT), HumanMessage(content=str(answer))]
+        )
+    except Exception:
+        try:
+            reply = await _intentModel_backup.ainvoke(
+                [SystemMessage(content=APPROVE_PROMPT), HumanMessage(content=str(answer))]
+            )
+        except Exception:
+            # 备用也失败时默认通过，不影响用户流程
+            return {"plan": state.get("plan") or {}}
     text = reply.content if isinstance(reply.content, str) else ""
     go, feedback = verdict(text, "go")
 

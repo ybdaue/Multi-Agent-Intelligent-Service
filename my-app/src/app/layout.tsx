@@ -1,6 +1,10 @@
+import "@/lib/antd-warn-silence";
+import "@ant-design/v5-patch-for-react-19";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "next-themes";
+import { App as AntApp } from "antd";
+import AppHeader from "./AppHeader";
 import "./tailwind.css";
 import "./globals.scss";
 
@@ -29,7 +33,10 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={`${geistSans.variable} ${geistMono.variable}`}>
         <ThemeProvider attribute="class" defaultTheme="light" storageKey="theme">
-          {children}
+          <AntApp>
+            <AppHeader />
+            {children}
+          </AntApp>
         </ThemeProvider>
       </body>
     </html>

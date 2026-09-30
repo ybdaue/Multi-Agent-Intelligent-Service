@@ -7,7 +7,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.tools import tool
 
-from agents.utils.models import MainModel
+from agents.utils.models import BackupMainModel, MainModel, invoke_with_fallback
 
 from .retrieve_law import retrieve_law_basis
 
@@ -41,8 +41,21 @@ def _last_agent_text(result: dict) -> str:
 # checkpointer=False：默认 None 时子图会继承父图的 checkpointer 与 thread_id，把
 # legal_agent 的整段对话 load 进来，连同"正在执行中、尚无 ToolMessage"的那条 tool_call
 # 一起发给模型，触发 400 insufficient tool messages。子 agent 是单次无状态计算，必须切断继承。
+try:
+    _consult_main = MainModel(service_type="legal", temperature=0.3, disable_streaming=True)
+    _consult_main_backup = BackupMainModel(service_type="legal", temperature=0.3, disable_streaming=True)
+except Exception:
+    _consult_main = None
+    _consult_main_backup = None
+
 _consult_agent = create_agent(
-    model=MainModel(temperature=0.3, disable_streaming=True),
+    model=_consult_main,
+    tools=[retrieve_law_basis],
+    checkpointer=False,
+)
+
+_consult_agent_backup = create_agent(
+    model=_consult_main_backup,
     tools=[retrieve_law_basis],
     checkpointer=False,
 )
@@ -58,7 +71,8 @@ def consult(question: str) -> str:
     if not question or not question.strip():
         return "请输入您的法律问题。"
 
-    result = _consult_agent.invoke(
+    result = invoke_with_fallback(
+        _consult_agent, _consult_agent_backup,
         {
             "messages": [
                 SystemMessage(content=CONSULT_PROMPT),

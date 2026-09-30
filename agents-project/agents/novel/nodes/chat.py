@@ -13,7 +13,7 @@ from langgraph.graph.message import add_messages
 
 from ..state import State
 from ..tools import fetchDB
-from ..utils import chatModel, CHAT_PROMPT, recent_history
+from ..utils import _chatModel_backup, CHAT_PROMPT, chatModel, recent_history
 
 
 class ChatState(TypedDict):
@@ -24,6 +24,13 @@ class ChatState(TypedDict):
 
 _chat_agent = create_agent(
     model=chatModel,
+    tools=[fetchDB],
+    system_prompt=CHAT_PROMPT,
+    state_schema=ChatState,
+)
+
+_chat_agent_backup = create_agent(
+    model=_chatModel_backup,
     tools=[fetchDB],
     system_prompt=CHAT_PROMPT,
     state_schema=ChatState,
@@ -67,15 +74,30 @@ async def chat(state: State, config: RunnableConfig):
     # config 只挑这两个键递给子图：fetchDB 要拿 novel_id，多带的 thread_id / checkpoint_ns
     # 会给这个没有 checkpointer 的子图种出一份自己的 checkpoint（写章那条子图是挂成节点、
     # 由引擎喂 config，这份是手调，得自己裁）。
-    result = await _chat_agent.ainvoke(
-        {"messages": [HumanMessage(content=_context(state))]},
-        config={
-            "configurable": {
-                "novel_id": str(cfg.get("novel_id") or ""),
-                "user_id": str(cfg.get("user_id") or ""),
-            }
-        },
-    )
+    try:
+        result = await _chat_agent.ainvoke(
+            {"messages": [HumanMessage(content=_context(state))]},
+            config={
+                "configurable": {
+                    "novel_id": str(cfg.get("novel_id") or ""),
+                    "user_id": str(cfg.get("user_id") or ""),
+                }
+            },
+        )
+    except Exception:
+        print("[chat] 主闲聊 agent 失败，尝试备用")
+        try:
+            result = await _chat_agent_backup.ainvoke(
+                {"messages": [HumanMessage(content=_context(state))]},
+                config={
+                    "configurable": {
+                        "novel_id": str(cfg.get("novel_id") or ""),
+                        "user_id": str(cfg.get("user_id") or ""),
+                    }
+                },
+            )
+        except Exception:
+            return {}
     reply = _last_reply(result.get("messages"))
     # 一个字都没答出来就什么都别往 messages 里塞（空回复会被历史口径滤掉，塞了也没意义）。
     return {"messages": [AIMessage(content=reply)]} if reply else {}

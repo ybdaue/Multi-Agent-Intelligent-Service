@@ -11,9 +11,19 @@ from agents import get_agent
 
 router = APIRouter(prefix="/api/finance/agent", tags=["金融智能体"])
 
-agent = get_agent("finance")
+_agent = None
+_agent_err = ""
+try:
+    _agent = get_agent("finance")
+except RuntimeError as e:
+    _agent_err = str(e)
 
 _STREAM_TIMEOUT = 120
+
+
+async def _error_stream(msg: str):
+    yield f"data: {json.dumps({'error': msg})}\n\n"
+    yield f"data: {json.dumps({'done': True})}\n\n"
 
 
 class QueryRequest(BaseModel):
@@ -28,11 +38,13 @@ class QueryResponse(BaseModel):
 
 @router.post("/query", response_model=QueryResponse)
 async def query_agent(req: QueryRequest):
+    if _agent is None:
+        raise HTTPException(status_code=503, detail=_agent_err)
     try:
         tid = req.thread_id or str(uuid4())
         loop = asyncio.get_running_loop()
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, agent.run, req.message, tid),
+            loop.run_in_executor(None, _agent.run, req.message, tid),
             timeout=_STREAM_TIMEOUT,
         )
         return QueryResponse(response=result, thread_id=tid)
@@ -44,11 +56,16 @@ async def query_agent(req: QueryRequest):
 
 @router.post("/stream")
 async def stream_agent(req: QueryRequest):
+    if _agent is None:
+        return StreamingResponse(
+            _error_stream("金融服务暂不可用：" + _agent_err),
+            media_type="text/event-stream",
+        )
     tid = req.thread_id or str(uuid4())
 
     async def generate():
         try:
-            ait = agent.stream(req.message, thread_id=tid).__aiter__()
+            ait = _agent.stream(req.message, thread_id=tid).__aiter__()
             while True:
                 try:
                     token = await asyncio.wait_for(

@@ -2,8 +2,6 @@ import json
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langgraph.graph import END
-from langgraph.types import Command
 
 from ..state import State
 from ..utils import model as models
@@ -45,7 +43,13 @@ async def _intent_node(state, config=None):
     # 必须 async/await：with_retry_and_fallback 本身是 async 节点（跑在事件循环上），
     # 同步 invoke 会把这整段 HTTP 调用内联到 loop 上，卡住所有并发请求。
     # Intent_model 实例已设 disable_streaming=True，意图 JSON 不会作为 token 下发。
-    response = await models.Intent_model.ainvoke(messages)
+    try:
+        response = await models.Intent_model.ainvoke(messages)
+    except Exception:
+        try:
+            response = await models.Intent_model_backup.ainvoke(messages)
+        except Exception:
+            raise
     try:
         parsed = json.loads(response.content)
         print("识别到用户意图", user_msg, parsed)
@@ -55,18 +59,16 @@ async def _intent_node(state, config=None):
     intent = parsed.get("primary_intent")
     if intent not in VALID_INTENTS:
         # 未能识别出有效意图：不做关键词猜测，直接结束并告知用户
-        return Command(
-            update={
-                "error": "意图识别结果为空",
-                "messages": [
-                    AIMessage(
-                        content="抱歉，我没能理解您的需求。请把想做的法律事项描述得更具体一些，"
-                        "例如让我审查合同、解释违约金，或起草一份劳动合同。"
-                    )
-                ],
-            },
-            goto=END,
-        )
+        # （条件边 route_after_intent 检测到 error 后路由到 END）
+        return {
+            "error": "意图识别结果为空",
+            "messages": [
+                AIMessage(
+                    content="抱歉，我没能理解您的需求。请把想做的法律事项描述得更具体一些，"
+                    "例如让我审查合同、解释违约金，或起草一份劳动合同。"
+                )
+            ],
+        }
 
     return {
         "primary_intent": intent,
@@ -79,10 +81,7 @@ async def _intent_node(state, config=None):
 
 
 def _intent_fallback(state, error=None):
-    return Command(
-        update={
-            "error": f"意图识别服务不可用：{error}",
-            "messages": [AIMessage(content="抱歉，意图识别服务暂时不可用，请稍后再试。")],
-        },
-        goto=END
-    )
+    return {
+        "error": f"意图识别服务不可用：{error}",
+        "messages": [AIMessage(content="抱歉，意图识别服务暂时不可用，请稍后再试。")],
+    }

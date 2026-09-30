@@ -65,6 +65,9 @@ model novel {
   wordCount Int      @default(0) //字数
   tropes    String? //小说套路
   style     String? //小说风格
+  banned    Boolean  @default(false)   // 是否封禁
+  banReason String?                     // 封禁原因
+  bannedAt  DateTime? @db.Timestamptz(3) // 封禁时间
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
 
@@ -95,6 +98,9 @@ model novel_chapter {
   pastSummary Json? //过去章节总结
   summary     String? //章节精简
   wordCount   Int      @default(0) //字数
+  banned      Boolean  @default(false)   // 是否封禁
+  banReason   String?                     // 封禁原因
+  bannedAt    DateTime? @db.Timestamptz(3) // 封禁时间
   createdAt   DateTime @default(now()) @db.Timestamptz
   updatedAt   DateTime @updatedAt @db.Timestamptz
 

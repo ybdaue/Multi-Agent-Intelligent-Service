@@ -5,15 +5,36 @@ model User {
   emailVerified Boolean  @default(false)
   name          String?
   image         String?
+  role          String   @default("user")
+  banned        Boolean  @default(false)
+  lastActiveAt  DateTime? @db.Timestamptz(3)
   createdAt     DateTime @default(now()) @db.Timestamptz(3)
   updatedAt     DateTime @updatedAt @db.Timestamptz(3)
 
-  sessions     Session[]
-  accounts     Account[]
-  checkpoints  checkpoint[]
-  agentStores  agent_store[]
-  userSessions user_session[]
-  novels       novel[]
+  sessions      Session[]
+  accounts      Account[]
+  checkpoints   checkpoint[]
+  agentStores   agent_store[]
+  userSessions  user_session[]
+  novels        novel[]
+  billingAccount BillingAccount?
+  userPlans      UserPlan[]
+  paymentOrders  PaymentOrder[]
+  activityLogs  UserActivityLog[]
+  announcements  Announcement[]
+}
+
+// 用户每日活跃日志，用于回溯历史 DAU
+model UserActivityLog {
+  id        String   @id @default(cuid())
+  userId    String
+  date      DateTime @db.Date
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  user      User     @relation(references: [id], fields: [userId], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([date])
 }
 
 model Session {

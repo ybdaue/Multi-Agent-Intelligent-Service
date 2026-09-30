@@ -17,7 +17,8 @@ import time
 import uuid
 from ..utils.checkpoint import create_checkpoint
 from ..utils.agent_store import create_agent_store
-from .utils.model import compressModel
+from .utils.model import compressModel, _compressModel_backup
+from agents.utils.models import ainvoke_with_fallback
 from .utils.prompt import SUMMARIZE_PROMPT
 from .state import State
 
@@ -62,12 +63,10 @@ async def summarize_chapter(state: State, config: RunnableConfig) -> dict:
         if prev_text
         else "这是本书第一章，没有上一版前文总结。"
     )
-    reply = await compressModel.ainvoke(
-        [
+    reply = await ainvoke_with_fallback(compressModel, _compressModel_backup, [
             SystemMessage(content=SUMMARIZE_PROMPT),
             HumanMessage(content=f"{asked}\n\n这一章的正文：\n\n{content}"),
-        ]
-    )
+        ])
     text = reply.content if isinstance(reply.content, str) else ""
     summary = m.group(1).strip() if (m := _SUMMARY_RE.search(text)) else ""
     past = m.group(1).strip() if (m := _PAST_RE.search(text)) else ""

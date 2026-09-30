@@ -12,6 +12,7 @@ from ..state import State
 from ..utils import (
     COMPACT_PROMPT,
     COMPACT_THRESHOLD,
+    _compressModel_backup,
     compressModel,
     render_history,
     split_for_compact,
@@ -29,15 +30,29 @@ async def _compact_node(state: State) -> dict:
         return {}
 
     summary = (state.get("chat_summary") or "").strip() or "（无）"
-    reply = await compressModel.ainvoke(
-        [
-            SystemMessage(content=COMPACT_PROMPT),
-            HumanMessage(
-                content=f"【已有摘要】\n{summary}\n\n"
-                f"【新的对话】\n{render_history(dropped)}"
-            ),
-        ]
-    )
+    try:
+        reply = await compressModel.ainvoke(
+            [
+                SystemMessage(content=COMPACT_PROMPT),
+                HumanMessage(
+                    content=f"【已有摘要】\n{summary}\n\n"
+                    f"【新的对话】\n{render_history(dropped)}"
+                ),
+            ]
+        )
+    except Exception:
+        try:
+            reply = await _compressModel_backup.ainvoke(
+                [
+                    SystemMessage(content=COMPACT_PROMPT),
+                    HumanMessage(
+                        content=f"【已有摘要】\n{summary}\n\n"
+                        f"【新的对话】\n{render_history(dropped)}"
+                    ),
+                ]
+            )
+        except Exception:
+            raise
     text = reply.content if isinstance(reply.content, str) else ""
     if not text.strip():
         return {}

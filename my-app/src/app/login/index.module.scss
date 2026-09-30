@@ -932,6 +932,36 @@ $gutter: clamp(1.5rem, 10vw, 14rem);
   to   { opacity: 1; transform: translateY(0); }
 }
 
+.legal {
+  margin-top: 1.25rem;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+
+  a {
+    color: inherit;
+    text-decoration: none;
+    transition: color 150ms;
+
+    &:hover {
+      color: var(--color-primary);
+    }
+  }
+
+  :global(.dark) & {
+    color: #8b93a7;
+
+    a:hover {
+      color: #a5b4fc;
+    }
+  }
+}
+
+.legalDot {
+  margin: 0 0.5rem;
+  opacity: 0.5;
+}
+
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(16px); }
   to   { opacity: 1; transform: translateY(0); }

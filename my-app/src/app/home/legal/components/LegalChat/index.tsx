@@ -338,7 +338,7 @@ export default function LegalChat() {
 
         if (!res.ok) {
           const body = await res.json().catch(() => null);
-          appendContent(`\n\n[错误] ${body?.error ?? `请求失败 (${res.status})`}`);
+          appendContent(`[错误] ${body?.error ?? `请求失败 (${res.status})`}`);
           return;
         }
         if (!res.body) {
@@ -374,7 +374,7 @@ export default function LegalChat() {
               } else if (event.event === "done") {
                 setStreamDone(true);
               } else if (event.event === "error") {
-                appendContent(`\n\n[错误] ${data.message ?? "服务异常"}`);
+                appendContent(`[错误] ${data.message ?? "服务异常"}`);
               }
             } catch {
               // 忽略无法解析的事件
@@ -390,7 +390,7 @@ export default function LegalChat() {
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error("Legal agent stream error:", err);
-        appendContent("\n\n[错误] 无法连接 AI 服务");
+        appendContent("[错误] 无法连接 AI 服务");
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
         setLoading(false);

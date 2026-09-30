@@ -155,6 +155,7 @@ async def _stream_agent(
         has_file = False
         streamed_any_token = False
         final_text = ""
+        has_error = False
         try:
             async for event in get_agent(agent_name).astream(
                 input_state, config, stream_mode=["messages", "values"]
@@ -192,6 +193,24 @@ async def _stream_agent(
 
                 elif mode == "values":
                     state = data
+                    # 图中某节点出错（意图识别/模型调用等 fallback）：只发送一次 error 事件，不走 final_text
+                    if state.get("error") and not has_error:
+                        has_error = True
+                        for m in reversed(state.get("messages") or []):
+                            if (
+                                isinstance(m, AIMessage)
+                                and not getattr(m, "tool_calls", None)
+                                and getattr(m, "content", None)
+                            ):
+                                content = m.content
+                                if isinstance(content, str) and content:
+                                    yield (
+                                        f"event: error\n"
+                                        f"data: {json.dumps({'message': content}, ensure_ascii=False)}\n\n"
+                                    )
+                                break
+                        continue
+
                     # 记录最终答复文本做兜底：偶发轮次全程无 token（如纯规则终稿）时，
                     # 仍把最后一条助手文本一次性补发给前端，避免误报"流式传输失败"
                     for m in reversed(state.get("messages") or []):
@@ -218,6 +237,8 @@ async def _stream_agent(
 
             if streamed_any_token or has_file:
                 yield f"event: done\ndata: {json.dumps({'message': 'ok'})}\n\n"
+            elif has_error:
+                yield f"event: done\ndata: {json.dumps({'message': 'error_sent'})}\n\n"
             elif final_text:
                 yield (
                     f"event: token\n"

@@ -1,6 +1,11 @@
 from langgraph.store.base import BaseStore
 from ..state import State
-from agents.utils.models import CompressModel, IntentModel, parse_json_object
+from agents.utils.models import (
+    BackupCompressModel, BackupIntentModel,
+    CompressModel, IntentModel,
+    ainvoke_with_fallback,
+    parse_json_object,
+)
 from pydantic import BaseModel, Field
 from typing import List
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, RemoveMessage
@@ -120,8 +125,14 @@ _summary_prompt = """你是一个法律对话记忆压缩器。你的任务是�
 # 改走流式，把画像 JSON / 历史摘要当 token 下发到前端，必须在实例上关掉。
 # 不用 with_structured_output：DeepSeek V4 默认 thinking，thinking 模式直接拒绝 tool_choice
 # （json_schema 与 function_calling 都 400），画像 JSON 改由提示词约束 + parse_json_object 解析。
-_profile_model = IntentModel(temperature=0.1, disable_streaming=True)
-_summarize_model = CompressModel(temperature=0.2, disable_streaming=True)
+try:
+    _profile_model = IntentModel(service_type="legal", temperature=0.1, disable_streaming=True)
+    _profile_model_backup = BackupIntentModel(service_type="legal", temperature=0.1, disable_streaming=True)
+    _summarize_model = CompressModel(service_type="legal", temperature=0.2, disable_streaming=True)
+    _summarize_model_backup = BackupCompressModel(service_type="legal", temperature=0.2, disable_streaming=True)
+except Exception:
+    _profile_model = _summarize_model = None
+    _profile_model_backup = _summarize_model_backup = None
 
 
 def _content_of(message) -> str:
@@ -203,7 +214,8 @@ async def _merge_summary(prev_summary: str, older_text: str, file_notes: str) ->
         )
     )
     try:
-        response = await _summarize_model.ainvoke(
+        response = await ainvoke_with_fallback(
+            _summarize_model, _summarize_model_backup,
             [prompt, HumanMessage(content=input_text)]
         )
         text = (response.content if isinstance(response.content, str) else str(response.content)).strip()
@@ -381,7 +393,8 @@ async def update(state: State, store: BaseStore):
         updated_memory = None
         for attempt in range(3):
             try:
-                resp = await _profile_model.ainvoke(
+                resp = await ainvoke_with_fallback(
+                    _profile_model, _profile_model_backup,
                     [formatted_system_message, user_prompt]
                 )
                 updated_memory = OutPut.model_validate(parse_json_object(resp.content))

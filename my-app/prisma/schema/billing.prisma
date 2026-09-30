@@ -1,0 +1,183 @@
+// 计费服务表
+model BillingAccount {
+  userId    String   @id
+  balance   Int      @default(0) // 余额，单位：分（人民币），可负值
+  version   Int      @default(1) // 乐观锁版本号
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  user      User              @relation(references: [id], fields: [userId], onDelete: Cascade)
+  records   BillingRecord[]
+  recharges RechargeRecord[]
+  userPlans UserPlan[]
+}
+
+model BillingRecord {
+  id           String   @id @default(cuid())
+  userId       String
+  serviceType  String   // novel / legal / finance / chat
+  provider     String   // qwen / deepseek / openai ...
+  modelName    String   // deepseek-v4-flash 等实际模型名
+  inputTokens  Int
+  outputTokens Int
+  totalTokens  Int
+  inputCost    Int      // 输入费用（分）
+  outputCost   Int      // 输出费用（分）
+  totalCost    Int      // 总费用（分）
+  balanceAfter Int      // 扣费后余额（分）
+  requestPath  String?  // API path，如 /api/novel/agent/run
+  threadId     String?  // LangGraph thread_id
+  // 套餐抵扣信息
+  planId              String?  // 使用了哪个套餐
+  planDeductedTokens  Int?     // 套餐抵扣了多少 raw token
+  balanceDeductedCost Int?     // 余额实际扣了多少钱（分）
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  account     BillingAccount @relation(references: [userId], fields: [userId])
+  planUsage   PlanTokenUsage[]
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@index([planId])
+}
+
+model ModelRoute {
+  id          String   @id @default(cuid())
+  role        String   // pricing | main | intent | compress | rerank
+  serviceType String   // novel / legal / finance / chat
+  provider    String   // qwen / deepseek / openai ...
+  modelName   String
+  inputPrice  Float    // 每百万 input tokens 价格（元）
+  outputPrice Float    // 每百万 output tokens 价格（元）
+  isActive    Boolean  @default(true)
+  isBackup    Boolean  @default(false)   // 是否为备用模型
+  priority    Int      @default(0)       // 备用优先级（越小越优先）
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([role, serviceType, provider, modelName, isBackup])
+  @@index([serviceType, isActive])
+}
+
+model RechargeRecord {
+  id            String   @id @default(cuid())
+  userId        String
+  amount        Int      // 充值金额（分）
+  balanceBefore Int      // 充值前余额
+  balanceAfter  Int      // 充值后余额
+  note          String?  // 管理员备注
+  planId        String?  // 触发充值的充值套餐 ID
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  account BillingAccount @relation(references: [userId], fields: [userId])
+
+  @@index([userId, createdAt])
+}
+
+// ── 套餐系统 ─────────────────────────────────────────────
+
+// 套餐商品目录
+model Plan {
+  id          String   @id @default(cuid())
+  name        String            // 套餐名称：如「新手充值包」「小说创作套餐」
+  type        String            // recharge | token | subscription
+  price       Int               // 售价（分）
+  description String?
+
+  // 充值套餐专属
+  bonusAmount Int?              // 赠送金额（分），type=recharge 时有效
+
+  // Token/订阅套餐专属
+  tokenAmount   Int?            // token 额度数
+  serviceType   String?         // 限制服务类型: novel/legal/finance/chat（null=不限）
+  modelName     String?         // 限制具体模型（null=不限）
+
+  // Token 套餐专属
+  validityDays Int?             // 购买后多少天有效（null=永久）
+
+  // 订阅套餐专属
+  periodDays  Int?              // 订阅周期天数，默认30
+  autoRenew   Boolean @default(true)  // 默认自动续费
+
+  // 通用
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  userPlans   UserPlan[]
+}
+
+// 用户已购套餐实例
+model UserPlan {
+  id        String @id @default(cuid())
+  userId    String
+  planId    String
+  status    String @default("active")    // active | exhausted | expired | cancelled
+
+  purchasedAt DateTime @default(now()) @db.Timestamptz(3)
+  activatedAt DateTime? @db.Timestamptz(3)
+  expiresAt   DateTime? @db.Timestamptz(3) // 有效期截止
+
+  // Token 额度追踪
+  totalTokens     Int                   // 总 token 额度
+  usedTokens      Int     @default(0)   // 已使用
+  remainingTokens Int                   // 剩余
+
+  // 订阅周期追踪
+  currentPeriodStart  DateTime? @db.Timestamptz(3)
+  currentPeriodEnd    DateTime? @db.Timestamptz(3)
+
+  // 最近一次续费尝试时间
+  lastRenewalAttempt  DateTime? @db.Timestamptz(3)
+
+  // 续费开关（默认继承 Plan.autoRenew，用户可单独关闭）
+  autoRenew Boolean @default(true)
+
+  user    User            @relation(references: [id], fields: [userId], onDelete: Cascade, map: "UserPlan_userId_fkey")
+  plan    Plan            @relation(references: [id], fields: [planId])
+  account BillingAccount @relation(references: [userId], fields: [userId], map: "UserPlan_accountId_fkey")
+
+  planUsage PlanTokenUsage[]
+
+  @@index([userId, status, remainingTokens])
+  @@index([userId, status, expiresAt])
+}
+
+// 套餐 token 使用明细（审计用）
+model PlanTokenUsage {
+  id              String   @id @default(cuid())
+  userPlanId      String
+  billingRecordId String
+  modelName       String
+  inputTokens     Int
+  outputTokens    Int
+  deductedTokens  Int               // 从套餐扣除了多少 raw token
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+
+  userPlan      UserPlan      @relation(fields: [userPlanId], references: [id])
+  billingRecord BillingRecord @relation(fields: [billingRecordId], references: [id])
+
+  @@index([userPlanId])
+}
+
+// 支付订单
+model PaymentOrder {
+  id            String   @id @default(cuid())
+  userId        String
+  planId        String?              // 购买的套餐（null=直接充值）
+  amount        Int                  // 金额（分）
+  status        String  @default("pending")  // pending | success | failed | expired
+  paymentMethod String  @default("balance")  // balance | alipay | wxpay
+  tradeNo       String?              // 支付网关交易号（mock 时自动生成）
+  paidAt        DateTime? @db.Timestamptz(3)
+  note          String?              // 备注
+  expiresAt     DateTime @db.Timestamptz(3) // 订单过期时间
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  user User @relation(references: [id], fields: [userId], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+}

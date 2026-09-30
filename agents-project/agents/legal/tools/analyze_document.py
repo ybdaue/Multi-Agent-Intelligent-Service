@@ -15,7 +15,11 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
-from agents.utils.models import MainModel, parse_json_object, parse_json_value
+from agents.utils.models import (
+    BackupMainModel, MainModel,
+    ainvoke_with_fallback,
+    parse_json_object, parse_json_value,
+)
 from agents.utils.executor import RAG_IO_EXECUTOR, run_in_pool
 from .retrieve_law import format_law_hits, search_law_text
 
@@ -142,8 +146,14 @@ CONSOLIDATE_PROMPT = """你是一位资深法律风险审查专家。下面是�
 # 扫描/汇总的中间 JSON 会作为 token 漏到前端，故在实例上关闭。
 # 不用 with_structured_output：DeepSeek V4 默认 thinking，thinking 模式直接拒绝 tool_choice
 # （json_schema 与 function_calling 都 400），结构化输出改走提示词约束 + parse_json_object 解析。
-_scan_batch_model = MainModel(temperature=0.1, disable_streaming=True)
-_consolidate_model = MainModel(temperature=0.1, disable_streaming=True)
+try:
+    _scan_batch_model = MainModel(service_type="legal", temperature=0.1, disable_streaming=True)
+    _scan_batch_model_backup = BackupMainModel(service_type="legal", temperature=0.1, disable_streaming=True)
+    _consolidate_model = MainModel(service_type="legal", temperature=0.1, disable_streaming=True)
+    _consolidate_model_backup = BackupMainModel(service_type="legal", temperature=0.1, disable_streaming=True)
+except Exception:
+    _scan_batch_model = _consolidate_model = None
+    _scan_batch_model_backup = _consolidate_model_backup = None
 
 # 批间并发线程数：减少墙钟时间
 SCAN_WORKERS = 4
@@ -226,7 +236,7 @@ async def _scan_batch(batch: list[tuple[dict, str]], sem: asyncio.Semaphore) -> 
     valid_indexes = {chunk["metadata"]["chunk_index"] for chunk, _ in batch}
     try:
         async with sem:
-            resp = await _scan_batch_model.ainvoke([
+            resp = await ainvoke_with_fallback(_scan_batch_model, _scan_batch_model_backup, [
                 HumanMessage(content=BATCH_SCAN_PROMPT.format(chunks_block=_build_chunks_block(batch)))
             ])
         # 模型可能给 {"risks": [...]}，也可能直接给裸数组 [...]；两种都收
@@ -352,7 +362,7 @@ async def _consolidate_node(state: AnalyseState) -> dict:
     raw = state.get("raw_risks", [])
 
     try:
-        resp = await _consolidate_model.ainvoke([
+        resp = await ainvoke_with_fallback(_consolidate_model, _consolidate_model_backup, [
             HumanMessage(content=CONSOLIDATE_PROMPT.format(
                 raw_risks_json=json.dumps(raw, ensure_ascii=False),
                 total_chunks=total,

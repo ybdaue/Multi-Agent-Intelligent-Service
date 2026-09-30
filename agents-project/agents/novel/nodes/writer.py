@@ -68,8 +68,13 @@ class WriterState(TypedDict):
 # 不挂任何"交稿"工具（正文与台账就是模型的回复，切开与落库是 save / update 的事）。
 # 开着流式：这一路的 token 要逐字发给前端当打字机。台账由 api/novel/stream.py 的
 # ProseFilter 在【本章台账】处截掉，落库仍走 save 的 split_submission，两边同一个标记。
+try:
+    _writer_main = MainModel(temperature=0.7, disable_streaming=False)
+except Exception:
+    _writer_main = None
+
 _writer_agent = create_agent(
-    model=MainModel(temperature=0.7, disable_streaming=False),
+    model=_writer_main,
     tools=[read_skill_file, fetchDB],
     system_prompt=WRITER_PROMPT,
     state_schema=WriterState,

@@ -4,7 +4,7 @@ from langgraph.types import Command
 from langgraph.graph import END
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from ..utils import INTENT_PROMPT, recent_history
+from ..utils import INTENT_PROMPT, _intentModel_backup, recent_history
 from ..utils.chapter_information import get_chapter_order
 from ..utils.retry import with_retry_and_fallback
 from typing import Optional
@@ -48,7 +48,13 @@ async def _intent_node(state: State, config: RunnableConfig):
             对话历史（最新在最后）：
             {history}"""
 
-    response = await intentModel.ainvoke([SystemMessage(system_content), HumanMessage(user_message)])
+    try:
+        response = await intentModel.ainvoke([SystemMessage(system_content), HumanMessage(user_message)])
+    except Exception:
+        try:
+            response = await _intentModel_backup.ainvoke([SystemMessage(system_content), HumanMessage(user_message)])
+        except Exception:
+            raise
 
     try:
         parsed = json.loads(response.content)

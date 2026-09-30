@@ -2,8 +2,6 @@ import json
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langgraph.graph import END
-from langgraph.types import Command
 
 from ..state import State
 from ..utils import model as models
@@ -127,11 +125,25 @@ async def _assistant_node(state, config=None):
     # 无待办任务（闲聊/能力咨询）：不绑工具、输出即最终答复，可以流式直答。
     # 有待办任务：改非流式，避免工具调用前的寒暄混进前端答复（见 invoke_assistant_model）。
     if pending_tasks:
-        response = await invoke_assistant_model(models.model, messages, config)
+        try:
+            response = await invoke_assistant_model(models.model, messages, config)
+        except Exception:
+            try:
+                response = await invoke_assistant_model(models.model_backup, messages, config)
+            except Exception:
+                raise
     else:
-        response = await stream_assistant_response(
-            models.MainModel(temperature=0.5), messages, config
-        )
+        try:
+            response = await stream_assistant_response(
+                models.MainModel(temperature=0.5), messages, config
+            )
+        except Exception:
+            try:
+                response = await stream_assistant_response(
+                    models.BackupMainModel(temperature=0.5), messages, config
+                )
+            except Exception:
+                raise
 
     # 强制每轮只调一个工具：并行调用会破坏任务先后依赖，只保留第一个，剩余丢弃
     if hasattr(response, "tool_calls") and len(response.tool_calls) > 1:
@@ -159,11 +171,8 @@ async def _assistant_node(state, config=None):
 
 def _assistant_fallback(state, error=None):
     tool_result_updates = extract_tool_results(state)
-    return Command(
-        update={
-            "error": f"调度模型服务不可用：{error}",
-            "messages": [AIMessage(content="抱歉，服务暂时不可用，请稍后再试。")],
-            **tool_result_updates,
-        },
-        goto=END
-    )
+    return {
+        "error": f"调度模型服务不可用：{error}",
+        "messages": [AIMessage(content="抱歉，服务暂时不可用，请稍后再试。")],
+        **tool_result_updates,
+    }

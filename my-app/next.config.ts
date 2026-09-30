@@ -5,6 +5,7 @@ const configInit = () => {
     turbopack: {
       root: __dirname,
     },
+    distDir: process.env.NEXT_DIST_DIR || '.next',
     reactCompiler: true,
     reactStrictMode: true,
     devIndicators: false,
@@ -19,6 +20,7 @@ const configInit = () => {
           source: "/api/agent/:path*",
           destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/agent/:path*`,
         },
+        // billing 和 admin 由 API Route Handler 代理（注入 Authorization header）
       ];
     },
     headers: () => {

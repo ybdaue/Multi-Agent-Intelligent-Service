@@ -1,0 +1,164 @@
+.banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  height: 36px;
+  overflow: hidden;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.12), rgba(139, 92, 246, 0.1));
+  border-bottom: 1px solid rgba(99, 102, 241, 0.15);
+  backdrop-filter: blur(8px);
+  flex-shrink: 0;
+  padding-right: 12px;
+}
+
+.icon {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #6366f1;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── 轮播区域 ── */
+
+.slideWrap {
+  flex: 1;
+  overflow: hidden;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.slide {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  animation: fadeIn 0.4s ease;
+  padding: 0 8px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.slideTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.2s;
+}
+
+.slideTitle:hover {
+  color: #6366f1;
+}
+
+.slideContent {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+
+.slideContent:hover {
+  color: #6366f1;
+}
+
+/* ── 圆点指示器 ── */
+
+.dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding-left: 12px;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.25);
+  cursor: pointer;
+  transition: all 0.3s;
+  flex-shrink: 0;
+}
+
+.dot:hover {
+  background: rgba(99, 102, 241, 0.5);
+}
+
+.dotActive {
+  width: 18px;
+  border-radius: 3px;
+  background: #6366f1;
+}
+
+/* ── 优先级标签 ── */
+
+.labelUrgent {
+  font-size: 11px;
+  padding: 0 6px;
+  line-height: 18px;
+  border-radius: 3px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.labelHigh {
+  font-size: 11px;
+  padding: 0 6px;
+  line-height: 18px;
+  border-radius: 3px;
+  background: rgba(249, 115, 22, 0.12);
+  color: #f97316;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+@keyframes fadeIn {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Modal 内样式 ── */
+
+.modalTitle {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 16px;
+  color: var(--color-text);
+}
+
+.modalMeta {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-bottom: 16px;
+}
+
+.modalContent {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

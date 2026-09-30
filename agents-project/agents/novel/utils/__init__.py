@@ -7,7 +7,8 @@ from .history import (
     split_for_compact,
 )
 from .novel_information import get_novel_meta
-from .model import intentModel,mainModel,compressModel,chatModel
+from .model import (intentModel, mainModel, compressModel, chatModel,
+    _chatModel_backup, _compressModel_backup, _intentModel_backup, _mainModel_backup)
 from .trace import traced
 from . prompt import (
     COMPACT_PROMPT,

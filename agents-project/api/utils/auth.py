@@ -71,4 +71,24 @@ async def auth_middleware(request: Request, call_next):
     if user_id is None:
         return _UNAUTHORIZED
     request.state.user_id = user_id
+
+    # 异步记录今日活跃 & 最后活跃时间（不阻塞响应）
+    try:
+        async with pg_pool.connection() as conn:
+            await conn.execute(
+                """INSERT INTO "UserActivityLog" ("id", "userId", "date")
+                   SELECT gen_random_uuid()::text, %s, CURRENT_DATE
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM "UserActivityLog"
+                       WHERE "userId" = %s AND "date" = CURRENT_DATE
+                   )""",
+                (user_id, user_id),
+            )
+            await conn.execute(
+                'UPDATE "User" SET "lastActiveAt" = NOW() WHERE "id" = %s',
+                (user_id,),
+            )
+    except Exception:
+        pass  # 非关键功能，忽略错误
+
     return await call_next(request)

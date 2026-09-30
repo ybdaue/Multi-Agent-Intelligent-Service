@@ -3,6 +3,8 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { services } from "@/lib/server/home/services-data";
+import { getActiveAnnouncements } from "@/lib/server/announcements";
+import AnnouncementBanner from "./components/AnnouncementBanner";
 import ServicesGrid from "./components/ServicesGrid";
 import MouseTrail from "./components/MouseTrail";
 import styles from "./page.module.scss";
@@ -13,16 +15,20 @@ async function UserGreeting() {
   return <h1 className={styles.heading}>你好，{session.user.name ?? "用户"}</h1>;
 }
 
-export default function Home() {
+export default async function Home() {
+  const announcements = await getActiveAnnouncements();
+  const hasBanner = announcements.length > 0;
+
   return (
     <>
+      <AnnouncementBanner announcements={announcements} />
       <div className={styles.bgShapes}>
         <div className={styles.shape1} />
         <div className={styles.shape2} />
         <div className={styles.shape3} />
       </div>
       <MouseTrail />
-      <main className={styles.main}>
+      <main className={`${styles.main} ${hasBanner ? styles.withBanner : ""}`}>
         <div className={styles.hero}>
           <Suspense fallback={<h1 className={styles.heading}>你好，...</h1>}>
             <UserGreeting />

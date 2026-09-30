@@ -1,0 +1,16 @@
+// 管理员操作审计日志
+model AdminAuditLog {
+  id          String   @id @default(cuid())
+  adminId     String
+  adminEmail  String
+  action      String                        // create | update | delete | ban | unban | recharge | deduct
+  targetType  String                        // user | novel | chapter | plan | pricing | order | announcement
+  targetId    String?
+  detail      String?
+  metadata    Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([adminId, createdAt])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}

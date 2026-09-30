@@ -42,11 +42,24 @@ async def _summary_node(state: State, config: RunnableConfig):
     )
 
     summary_text = ""
-    async for chunk in models._summarizer_model.astream(
-        [SystemMessage(content=prompt)], config
-    ):
-        if isinstance(chunk.content, str) and chunk.content:
-            summary_text += chunk.content
+    try:
+        _stream = models._summarizer_model.astream(
+            [SystemMessage(content=prompt)], config
+        )
+        async for chunk in _stream:
+            if isinstance(chunk.content, str) and chunk.content:
+                summary_text += chunk.content
+    except Exception:
+        print("[summary] 主总结模型流式失败，尝试备用模型")
+        try:
+            async for chunk in models._summarizer_model_backup.astream(
+                [SystemMessage(content=prompt)], config
+            ):
+                if isinstance(chunk.content, str) and chunk.content:
+                    summary_text += chunk.content
+        except Exception as e2:
+            print(f"[summary] 备用总结模型也失败: {e2}")
+            summary_text = ""
     summary_text = summary_text.strip() or "本轮任务已完成。"
 
     updates = []

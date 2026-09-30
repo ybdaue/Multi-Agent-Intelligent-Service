@@ -22,7 +22,9 @@ MAX_STEPS = 10
 
 class FinanceAgent:
     def __init__(self):
-        self.model = MainModel()
+        self.model = MainModel(service_type="finance")
+        if self.model is None:
+            raise RuntimeError("金融模型未配置，请在后台「模型管理」页面配置后再使用")
         self.tools = get_tools("finance")
         self.agent = self._build_agent()
 

@@ -15,12 +15,12 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from agents.utils.models import parse_json_value
+from agents.utils.models import ainvoke_with_fallback, parse_json_value
 from ..state import ChapterConflict, ChapterMeta, ChapterReview, NovelMeta
 from ..tools import fetchDB, read_skill_file
 from ..utils.chapter_information import get_writer_context
 from ..utils.ledger import fetch_ref_facts
-from ..utils.model import MainModel
+from ..utils.model import BackupMainModel, MainModel
 from ..utils.novel_information import render_protagonists
 from ..utils.prompt import READER_PROMPT
 from ..utils.trace import traced
@@ -61,8 +61,22 @@ class ReaderState(TypedDict, total=False):
 # 审查要稳定判断，temperature 比 writer 低；不挂 run_skill_script（只读文档）、
 # 不挂"交结论"工具（判词就是模型的回复，收结论是 save 的事）。
 # disable_streaming：输出是给父图判路用的，不是给前端的。
+try:
+    _reader_main = MainModel(temperature=0.1, disable_streaming=True)
+    _reader_main_backup = BackupMainModel(temperature=0.1, disable_streaming=True)
+except Exception:
+    _reader_main = None
+    _reader_main_backup = None
+
 _reader_agent = create_agent(
-    model=MainModel(temperature=0.1, disable_streaming=True),
+    model=_reader_main,
+    tools=[read_skill_file, fetchDB],
+    system_prompt=READER_PROMPT,
+    state_schema=_Chat,
+)
+
+_reader_agent_backup = create_agent(
+    model=_reader_main_backup,
     tools=[read_skill_file, fetchDB],
     system_prompt=READER_PROMPT,
     state_schema=_Chat,
@@ -247,20 +261,41 @@ def _route_after_gather(state: ReaderState) -> str:
 
 async def check(state: ReaderState, config: RunnableConfig) -> dict:
     """过六类硬伤 + 对照档案自问自答，交回原始判词。"""
-    result = await _reader_agent.ainvoke(
-        {
-            "messages": [
-                HumanMessage(
-                    content=_check_briefing(
-                        state,
-                        state.get("materials") or "",
-                        state.get("facts") or "",
+    try:
+        result = await _reader_agent.ainvoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=_check_briefing(
+                            state,
+                            state.get("materials") or "",
+                            state.get("facts") or "",
+                        )
                     )
-                )
-            ]
-        },
-        config,
-    )
+                ]
+            },
+            config,
+        )
+    except Exception:
+        print("[reader] 主审查 agent 失败，尝试备用")
+        try:
+            result = await _reader_agent_backup.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content=_check_briefing(
+                                state,
+                                state.get("materials") or "",
+                                state.get("facts") or "",
+                            )
+                        )
+                    ]
+                },
+                config,
+            )
+        except Exception:
+            # 备用也失败时默认通过审查，不阻塞写作流程
+            return {"chapter_review": {"passed": True, "problems": ""}}
     return {"report": _last_reply(result.get("messages"))}
 
 

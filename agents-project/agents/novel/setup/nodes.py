@@ -11,7 +11,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, interrupt
 
-from ..utils.model import MainModel, intentModel
+from ..utils.model import BackupMainModel, MainModel, _intentModel_backup, intentModel
+from agents.utils.models import ainvoke_with_fallback
 from ..utils.novel_information import save_novel_meta
 from ..utils.verdict import verdict
 from .prompt import CONFIRM_PROMPT
@@ -30,7 +31,12 @@ from .state import SetupState
 
 # 问题要逐字流给用户，所以这里**不能** disable_streaming（主图那几个模型都关着）。
 # 温度比判词高一些：它要说人话、要接住用户的话茬。
-_setupModel = MainModel(temperature=0.6)
+try:
+    _setupModel = MainModel(temperature=0.6)
+    _setupModel_backup = BackupMainModel(temperature=0.6)
+except Exception:
+    _setupModel = None
+    _setupModel_backup = None
 
 
 def _last_human_message(messages) -> str:
@@ -114,13 +120,11 @@ async def collect(state: SetupState, config: RunnableConfig) -> dict:
     pending = (state.get("user_message") or "").strip()
     brief = _brief(state, pending)
 
-    reply = await _setupModel.ainvoke(
-        [
-            SystemMessage(content=SETUP_SYSTEM),
-            *(state.get("messages") or []),
-            HumanMessage(content=brief),
-        ]
-    )
+    reply = await ainvoke_with_fallback(_setupModel, _setupModel_backup, [
+        SystemMessage(content=SETUP_SYSTEM),
+        *(state.get("messages") or []),
+        HumanMessage(content=brief),
+    ])
     text = reply.content if isinstance(reply.content, str) else ""
     prose, blocks_text = split_reply(text)
 
@@ -175,9 +179,17 @@ async def confirm(state: SetupState, config: RunnableConfig) -> Command:
     )
     answer = interrupt(text)
 
-    reply = await intentModel.ainvoke(
-        [SystemMessage(content=CONFIRM_PROMPT), HumanMessage(content=str(answer))]
-    )
+    try:
+        reply = await intentModel.ainvoke(
+            [SystemMessage(content=CONFIRM_PROMPT), HumanMessage(content=str(answer))]
+        )
+    except Exception:
+        try:
+            reply = await _intentModel_backup.ainvoke(
+                [SystemMessage(content=CONFIRM_PROMPT), HumanMessage(content=str(answer))]
+            )
+        except Exception:
+            reply_text = ""
     reply_text = reply.content if isinstance(reply.content, str) else ""
     approved, _ = verdict(reply_text, "confirmed")
 

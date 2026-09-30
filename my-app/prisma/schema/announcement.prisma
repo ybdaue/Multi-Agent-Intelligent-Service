@@ -1,0 +1,20 @@
+// 系统公告
+model Announcement {
+  id          String   @id @default(cuid())
+  title       String
+  content     String
+  status      String   @default("draft")     // draft | published | archived
+  priority    String   @default("normal")    // low | normal | high | urgent
+  targetRole  String?                        // user | admin | null=all
+  publishAt   DateTime? @db.Timestamptz(3)
+  expiresAt   DateTime? @db.Timestamptz(3)
+  publishedAt DateTime? @db.Timestamptz(3)
+  createdBy   String
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  creator User @relation(fields: [createdBy], references: [id])
+
+  @@index([status, publishAt])
+  @@index([status, expiresAt])
+}

@@ -14,7 +14,7 @@ from .state import State
 from .utils.memory import checkin, load_memory, update
 from .utils.model import legal_tools
 from .utils.retry import with_retry_and_fallback
-from .utils.routes import route_after_checkin, use_child_agent
+from .utils.routes import route_after_checkin, route_after_intent, use_child_agent
 
 checkpointer = create_checkpoint("legal_agent")
 store = create_agent_store("legal_agent")
@@ -40,7 +40,11 @@ legal_workflow.add_conditional_edges(
     {"preprocessing": "preprocessing", "Intent": "Intent"},
 )
 legal_workflow.add_edge("preprocessing", "Intent")
-legal_workflow.add_edge("Intent", "load_memory")
+legal_workflow.add_conditional_edges(
+    "Intent",
+    route_after_intent,
+    {"load_memory": "load_memory", END: END},
+)
 legal_workflow.add_edge("load_memory", "assistant")
 legal_workflow.add_conditional_edges(
     "assistant",

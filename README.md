@@ -61,6 +61,7 @@ docker compose up
 
 # 3. 浏览器打开
 open http://localhost:3000
+open http://26.41.157.27:3000
 ```
 
 容器清单：

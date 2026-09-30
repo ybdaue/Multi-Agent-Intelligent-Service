@@ -17,7 +17,12 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.tools import tool
 from langgraph.config import get_config
 from pydantic import BaseModel, Field
-from agents.utils.models import MainModel, CompressModel, parse_json_object
+from agents.utils.models import (
+    BackupCompressModel, BackupMainModel,
+    CompressModel, MainModel,
+    ainvoke_with_fallback,
+    parse_json_object,
+)
 from agents.utils.RAG import get_chunk, get_chunk_num
 from agents.utils.executor import PREPROCESS_EXECUTOR, RAG_IO_EXECUTOR, run_in_pool
 from .retrieve_law import retrieve_law_basis
@@ -87,7 +92,12 @@ REVISE_PROMPT = """你是一位资深法律文书起草专家。根据修改意�
 
 # disable_streaming：图内 attach messages 流式回调时 invoke 会被 langchain 自动
 # 改走流式，内部模型（需求压缩、起草 agent）的输出会作为 token 漏到前端。
-_condense_model = CompressModel(temperature=0.1, disable_streaming=True)
+try:
+    _condense_model = CompressModel(service_type="legal", temperature=0.1, disable_streaming=True)
+    _condense_model_backup = BackupCompressModel(service_type="legal", temperature=0.1, disable_streaming=True)
+except Exception:
+    _condense_model = None
+    _condense_model_backup = None
 
 
 class DraftSection(BaseModel):
@@ -108,8 +118,21 @@ class DraftDocument(BaseModel):
 # 不用 response_format（ToolStrategy/ProviderStrategy 都会 400）：DeepSeek V4 默认 thinking，
 # thinking 模式直接拒绝 tool_choice 与 response_format=json_schema。改为提示词约束模型只输出
 # JSON，再由 _parse_structured 解析。工具循环仍保留，故 recursion_limit 需抬高。
+try:
+    _draft_main = MainModel(service_type="legal", temperature=0.3, disable_streaming=True)
+    _draft_main_backup = BackupMainModel(service_type="legal", temperature=0.3, disable_streaming=True)
+except Exception:
+    _draft_main = None
+    _draft_main_backup = None
+
 _draft_agent = create_agent(
-    model=MainModel(temperature=0.3, disable_streaming=True),
+    model=_draft_main,
+    tools=[retrieve_law_basis],
+    checkpointer=False,
+)
+
+_draft_agent_backup = create_agent(
+    model=_draft_main_backup,
     tools=[retrieve_law_basis],
     checkpointer=False,
 )
@@ -170,7 +193,7 @@ async def _prepare_original_content(file_id: str) -> str:
     if len(text) <= FULL_TEXT_LIMIT:
         return text
     try:
-        resp = await _condense_model.ainvoke([
+        resp = await ainvoke_with_fallback(_condense_model, _condense_model_backup, [
             SystemMessage(
                 content=CONDENSE_PROMPT.format(content=text[:CONDENSE_INPUT_LIMIT])
             ),
@@ -325,15 +348,30 @@ async def draft_document(
         human_content = f"请起草一份{doc_type}，需求：{requirement}"
 
     # 法律依据由 agent 起草/修订前通过 retrieve_law 工具自行检索；最终输出为 JSON 文本。
-    result = await _draft_agent.ainvoke(
-        {
-            "messages": [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=human_content),
-            ]
-        },
-        config={"recursion_limit": 20},
-    )
+    try:
+        result = await _draft_agent.ainvoke(
+            {
+                "messages": [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=human_content),
+                ]
+            },
+            config={"recursion_limit": 20},
+        )
+    except Exception:
+        print("[draftor] 主起草 agent 失败，尝试备用 agent")
+        try:
+            result = await _draft_agent_backup.ainvoke(
+                {
+                    "messages": [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=human_content),
+                    ]
+                },
+                config={"recursion_limit": 20},
+            )
+        except Exception as e:
+            raise RuntimeError(f"文书起草服务不可用: {e}")
 
     title, sections = _parse_structured(_last_agent_text(result))
 
