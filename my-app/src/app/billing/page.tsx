@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { App, DatePicker, Input, Select } from "antd";
+import { App, DatePicker, Select } from "antd";
 import { getOverview, getRecords, getRecharges, getActiveUserPlans, getPaymentOrders, toggleAutoRenew } from "@/lib/server/billing-actions";
 import styles from "./page.module.scss";
 
@@ -16,13 +16,9 @@ interface Overview {
 interface BillingRecord {
   id: string;
   serviceType: string;
-  provider: string;
-  modelName: string;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
-  inputCost: number;
-  outputCost: number;
   totalCost: number;
   balanceAfter: number;
   requestPath: string | null;
@@ -137,7 +133,6 @@ export default function BillingPage() {
   // 账单
   const [recordsDateRange, setRecordsDateRange] = useState<[string, string]>(["", ""]);
   const [recordsServiceType, setRecordsServiceType] = useState<string>("");
-  const [recordsModelName, setRecordsModelName] = useState("");
   // 余额
   const [rechargesDateRange, setRechargesDateRange] = useState<[string, string]>(["", ""]);
   // 订单
@@ -162,8 +157,7 @@ export default function BillingPage() {
     dateFrom: recordsDateRange[0] || undefined,
     dateTo: recordsDateRange[1] || undefined,
     serviceType: recordsServiceType || undefined,
-    modelName: recordsModelName || undefined,
-  }), [recordsDateRange, recordsServiceType, recordsModelName]);
+  }), [recordsDateRange, recordsServiceType]);
 
   const fetchRecords = useCallback(() => {
     setRecordsLoading(true);
@@ -377,14 +371,6 @@ export default function BillingPage() {
                 { value: "chat", label: "闲聊" },
               ]}
             />
-            <Input
-              size="small"
-              allowClear
-              placeholder="模型"
-              style={{ width: 150 }}
-              value={recordsModelName}
-              onChange={(e) => { setRecordsModelName(e.target.value); setRecordsPage(1); }}
-            />
           </span>
         </h2>
         {recordsError ? (
@@ -404,7 +390,6 @@ export default function BillingPage() {
                 <tr>
                   <th>时间</th>
                   <th>服务</th>
-                  <th>模型</th>
                   <th className={styles.num}>Input</th>
                   <th className={styles.num}>Output</th>
                   <th className={styles.num}>费用</th>
@@ -418,7 +403,6 @@ export default function BillingPage() {
                       {formatDateTime(r.createdAt)}
                     </td>
                     <td>{serviceLabel(r.serviceType)}</td>
-                    <td>{r.modelName}</td>
                     <td className={styles.num}>
                       {r.inputTokens.toLocaleString()}
                     </td>

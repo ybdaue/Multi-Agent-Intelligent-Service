@@ -55,15 +55,6 @@ export interface RecentBillingItem {
   createdAt: string;
 }
 
-export interface ModelRankingItem {
-  modelName: string;
-  serviceType: string;
-  callCount: number;
-  totalCost: number;
-  inputTokens: number;
-  outputTokens: number;
-}
-
 export interface UserTopItem {
   userId: string;
   userEmail: string;

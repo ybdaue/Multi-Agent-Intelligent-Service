@@ -3,18 +3,18 @@
 一个 thread 就是一本待建的书，thread_id 取 novel_id（前端在弹窗打开时就生成好，与主图那本
 书共用一个 id，但两边各自一个 checkpoint 名，快照不互相踩）。
 
-一轮就是一次请求：模型把话说完（散文逐字下发），图停在 wait 上等答复（或六项齐了停在
-confirm 上等过目）。interrupt 一来这一轮就结束了，所以流里要把「问题」交给前端；用户答了再走
-/resume，同一个 thread_id，用 Command(resume=答复) 接着跑。认可之后 save 落库，final 带
-saved=true，前端据此关窗、刷新书架。
+一轮就是一次请求：discuss 节点流式生成问题，停在 interrupt 上等答复。用户答了走 /resume，
+同一条 thread_id 用 Command(resume=答复) 接着跑。每一步：用户答 → maintain 提取 →
+discuss 再问下一项（流式），直至六项齐了 → confirm 过目 → save 落库。final 带 saved=true，
+前端据此关窗、刷新书架。
 
 事件只有 session / token / question / final / error / done：
-  - token 只来自 collect（图里唯一开流式的模型；confirm 的 intentModel 关着流式），
-    且内容全是散文 —— 标记块由 stream.SettingFilter 在它起点处截断。
+  - token 来自 discuss 节点（图里唯一开流式的模型），内容全是散文。
   - 没有 stage，也没有 prose_start：一轮只有一次模型流，前端提交时自己挂一句"正在想…"。
 """
 import json
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -22,8 +22,6 @@ from langchain_core.messages import AIMessageChunk
 from langgraph.types import Command
 
 from agents.novel.setup import novel_setup_agent
-
-from .stream import SettingFilter
 
 router = APIRouter(prefix="/api/novel/setup", tags=["小说开书"])
 
@@ -34,22 +32,6 @@ _SSE_HEADERS = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
-
-
-async def _has_paused(user_id: str, novel_id: str) -> bool:
-    """这本开书是否正停在 interrupt 上等答复。"""
-    from langgraph.checkpoint.base import BaseCheckpointException
-
-    try:
-        snapshot = await novel_setup_agent.aget_state(_config(user_id, novel_id))
-    except BaseCheckpointException:
-        return False
-    if snapshot is None:
-        return False
-    for task in getattr(snapshot, "tasks", None) or ():
-        if getattr(task, "interrupts", None):
-            return True
-    return False
 
 
 def _event(name: str, payload: dict) -> str:
@@ -70,15 +52,17 @@ def _chunk_text(chunk) -> str:
     return ""
 
 
-def _config(user_id: str, novel_id: str) -> dict:
+def _config(user_id: str, novel_id: str, callbacks: Optional[list] = None) -> dict:
     return {
+        "callbacks": callbacks,
         "configurable": {
             "thread_id": novel_id,
             "novel_id": novel_id,
             "user_id": user_id,
         },
-        # 一轮只走 collect → wait 两步，用不到默认 25 那么多；interrupt 会结束这一轮，
-        # 用户一轮轮作答不累积。留着是为了跟主图一个口径，回炉几次也不会撞上限。
+        # greeting → discuss → maintain → ... 循环，用不到默认 25 那么多；
+        # interrupt 会结束这一轮，用户一轮轮作答不累积。
+        # 留着是为了跟主图一个口径，回炉几次也不会撞上限。
         "recursion_limit": 80,
     }
 
@@ -118,48 +102,64 @@ async def _snapshot(user_id: str, novel_id: str) -> dict:
     return values
 
 
-def _sse(*, user_id: str, novel_id: str, graph_input) -> StreamingResponse:
+def _sse(*, user_id: str, novel_id: str, graph_input, callbacks: Optional[list] = None) -> StreamingResponse:
     """把一轮开书图跑成 SSE。"""
-
     async def event_stream():
         yield _event("session", {"threadId": novel_id})
-        prose = SettingFilter()
+        replayed = True
         question = ""
+        saved = False
+        edit_note = ""
         try:
-            async for mode, data in novel_setup_agent.astream(
-                graph_input, _config(user_id, novel_id), stream_mode=["messages", "updates"]
+            async for namespace, mode, data in novel_setup_agent.astream(
+                graph_input, _config(user_id, novel_id, callbacks), stream_mode=["messages", "updates"],
+                subgraphs=True,
             ):
                 if mode == "messages":
+                    if replayed:
+                        continue
                     chunk, metadata = data
                     if not isinstance(chunk, AIMessageChunk):
                         continue
-                    # 图里只有 collect 的模型开流式（confirm 的 intentModel 关着），这一行是
-                    # 第二道保险。collect 是普通节点，metadata 里的节点名就是准的。
-                    if (metadata or {}).get("langgraph_node") == "collect":
-                        for name, payload in prose.feed(_chunk_text(chunk)):
-                            yield _event(name, payload)
+                    meta = metadata or {}
+                    node = str(meta.get("langgraph_node") or "")
+                    if node == "discuss":
+                        text = _chunk_text(chunk)
+                        if text:
+                            yield _event("token", {"text": text})
                 elif mode == "updates":
                     for node, update in (data or {}).items():
-                        # interrupt 只从这条流里接得到（快照的 tasks[].interrupts 是空的）
-                        if node == "__interrupt__" and not question:
+                        if node == "__interrupt__":
+                            # Resume 时可能有重放过来的旧 interrupt，但最新的 interrupt 一定来自
+                            # 当前真正执行的节点（ask_user），后面会覆盖前面，最终值就是正确的。
                             for item in update or ():
                                 if getattr(item, "value", None):
                                     question = str(item.value)
                                     break
+                        elif node == "save":
+                            if isinstance(update, dict):
+                                if update.get("saved"):
+                                    saved = True
+                                if update.get("edit_note"):
+                                    edit_note = str(update["edit_note"])
+                        else:
+                            replayed = False
 
-            for name, payload in prose.flush():
-                yield _event(name, payload)
-
-            # 停下来的问题：流里接到的与快照里的互为备份，谁有用谁。两处都空就是这一轮没停
-            # （走到 save 收工），那不是错误，交给 final 说。**取 [0] 之前必须判空**。
-            values = await _snapshot(user_id, novel_id)
-            interrupts = values.get("__interrupt__") or ()
-            first = interrupts[0] if interrupts else None
-            text = str(getattr(first, "value", "") or question)
-            if text:
-                yield _event("question", {"text": text})
+            # 优先用流里捕获的 save 节点返回值（比 snapshot 更即时）
+            if saved:
+                yield _event("final", {"saved": True, "message": edit_note, "novelId": novel_id})
             else:
-                yield _event("final", _final_payload(values, novel_id))
+                # 回退到 snapshot（权威来源）
+                values = await _snapshot(user_id, novel_id)
+                interrupts = values.get("__interrupt__") or ()
+                first = interrupts[0] if interrupts else None
+                if first:
+                    yield _event("question", {"text": str(getattr(first, "value", ""))})
+                elif question:
+                    # snapshot 没取到但流里捕获了（LangGraph 版本差异），直接用它
+                    yield _event("question", {"text": question})
+                else:
+                    yield _event("final", _final_payload(values, novel_id))
             yield _event("done", {})
         except Exception as e:  # 流已经开了，只能把错误当一条事件发出去
             # 前端只拿得到一句话，出了岔子得让服务端日志留住 traceback（否则无从下手）。
@@ -180,12 +180,12 @@ async def run_setup(
         raise HTTPException(status_code=400, detail="至少说一句想写什么")
 
     user_id = str(request.state.user_id)
-    if await _has_paused(user_id, novelId):
-        raise HTTPException(status_code=409, detail="上一轮还没答完，请先回答当前问题")
+    handler = getattr(request.state, "token_collector", None)
     return _sse(
         user_id=user_id,
         novel_id=novelId,
         graph_input={"user_id": user_id, "user_message": text},
+        callbacks=[handler] if handler else None,
     )
 
 
@@ -200,10 +200,10 @@ async def resume_setup(
         raise HTTPException(status_code=400, detail="答复不能是空的")
 
     user_id = str(request.state.user_id)
-    if not await _has_paused(user_id, novelId):
-        raise HTTPException(status_code=400, detail="没有待恢复的对话")
+    handler = getattr(request.state, "token_collector", None)
     return _sse(
         user_id=user_id,
         novel_id=novelId,
         graph_input=Command(resume=answer),
+        callbacks=[handler] if handler else None,
     )

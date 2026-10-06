@@ -1,54 +1,44 @@
 import importlib.util
+import json
 import os
 import sys
 import time
-
-import chromadb
-import torch
-from chromadb.config import Settings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from sentence_transformers import SentenceTransformer
+
+import chromadb
+from chromadb.config import Settings
 
 # 用户上传切片在向量库中的存活时长（7 天，与 temp_file/legal_created_file 的 expiresAt 一致），
 # 超时后由 delete_expired_chunks 清理
 FILE_TTL_SECONDS = 7 * 24 * 60 * 60
 
-# 本地 embedding 模型目录（离线加载，不再联网下载）
-# 本文件在 agents/utils/ 下，向上三级才是 agents-project/
-MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "models" / "bge-large-zh-v1.5"
-
-# 有 NVIDIA GPU 且 torch 为 CUDA 版则用显卡，否则降级 CPU（不报错）
-_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 _client: Optional[chromadb.HttpClient] = None
 _collection = None
 _laws_collection = None
-_embedder: Optional[SentenceTransformer] = None
 _model_ready: bool = False
 _chroma_ready: bool = False
+_API_EMBED_MODEL = "qwen3.7-text-embedding-flash"
+_API_BASE = "https://maas.qianwenaiapi.com/compatible-mode/v1/embeddings"
 
-# 初始化 Chroma 连接和 embedding 模型
+
+# 初始化 Chroma 连接和 embedding API 配置
 def init() -> None:
-    global _client, _collection, _laws_collection, _embedder, _model_ready, _chroma_ready
+    global _client, _collection, _laws_collection, _model_ready, _chroma_ready
 
-    # 模型只加载一次，失败也不重试
+    # 检查 API key
     if not _model_ready:
-        try:
-            # 加载 embedding 模型（本地跑，不在 Docker 里）；有卡上 cuda，无卡降级 cpu
-            _embedder = SentenceTransformer(str(MODEL_DIR), device=_DEVICE)
-            _model_ready = True
-            print(f"Embedding 模型加载完成（device={_DEVICE}）")
-        except Exception as e:
-            print(f"Embedding 模型加载失败（不会重试）: {e}")
-            _chroma_ready = False
+        api_key = os.getenv("DASHSCOPE_API_KEY")
+        if not api_key:
+            print("[RAG] DASHSCOPE_API_KEY 未配置")
             return
+        _model_ready = True
 
     # Chroma 连接可反复重试
     try:
         # 连 Docker 里的 Chroma
         _client = chromadb.HttpClient(
-            host=os.getenv("CHROMA_SERVER_HOST", "localhost"),   # Docker 内由环境变量覆盖
+            host=os.getenv("CHROMA_SERVER_HOST", "localhost"),
             port=8000,
             settings=Settings(anonymized_telemetry=False),
         )
@@ -77,11 +67,54 @@ def init() -> None:
 def is_ready() -> bool:
     return _model_ready and _chroma_ready and _laws_collection is not None
 
+
+# ── Embedding API ──────────────────
+
+def _api_embed(texts: list[str]) -> list[list[float]]:
+    """通过 DashScope 兼容 API 获取 embedding 向量。"""
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    if not api_key:
+        print("[RAG] API embedding 失败：DASHSCOPE_API_KEY 未配置")
+        return []
+
+    import requests
+    try:
+        resp = requests.post(
+            _API_BASE,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": _API_EMBED_MODEL, "input": texts},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # 按 index 排序后返回 embeddings
+        sorted_data = sorted(data["data"], key=lambda x: x["index"])
+        return [item["embedding"] for item in sorted_data]
+    except Exception as e:
+        print(f"[RAG] API embedding 请求失败: {e}")
+        return []
+
+
+def _encode(texts: list[str], *, batch_size: int = 128) -> list[list[float]]:
+    """通过 API 获取 embedding 向量。"""
+    # API 不支持 batch 时按需拆分
+    if len(texts) <= batch_size:
+        return _api_embed(texts)
+    all_embeddings = []
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i:i + batch_size]
+        result = _api_embed(chunk)
+        if not result:
+            return []
+        all_embeddings.extend(result)
+    return all_embeddings
+
+
 # 将分块文本写入 Chroma 向量库
 def upsert_chunks(chunks: List[Dict[str, Any]], target: str = "docs") -> Optional[bool]:
     """
     target="docs" → 写入 legal_docs（用户上传文件）
-    target="laws" → 写入 laws_docs（系统法律法规） 
+    target="laws" → 写入 laws_docs（系统法律法规）
     """
     if not is_ready():
         init()
@@ -106,7 +139,7 @@ def upsert_chunks(chunks: List[Dict[str, Any]], target: str = "docs") -> Optiona
             f"{c['metadata']['file_id']}_{c['metadata']['chunk_index']}"
             for c in chunks
         ]
-        embeddings = _embedder.encode(documents, normalize_embeddings=True).tolist()
+        embeddings = _encode(documents)
         col.upsert(
             documents=documents,
             embeddings=embeddings,
@@ -119,19 +152,21 @@ def upsert_chunks(chunks: List[Dict[str, Any]], target: str = "docs") -> Optiona
         print(f"upsert_chunks 失败: {e}")
         return False
 
+
 # 把整批文本一次性向量化
 def embed_documents(documents: list[str], *, batch_size: int = 128) -> list:
     if not documents:
         return []
-    if _embedder is None:
+    if not _model_ready:
         init()
-    if _embedder is None:
+    if not _model_ready:
         return []
     try:
-        return _embedder.encode(documents, batch_size=batch_size, normalize_embeddings=True).tolist()
+        return _encode(documents, batch_size=batch_size)
     except Exception as e:
         print(f"embed_documents 失败: {e}")
         return []
+
 
 # 用调用方已算好的 embeddings 直接入库（不再二次 encode）
 def upsert_preembedded(
@@ -162,6 +197,7 @@ def upsert_preembedded(
         print(f"upsert_preembedded 失败: {e}")
         return False
 
+
 # 删除 legal_docs 中 created_at 早于 cutoff 的过期切片，返回删除数量
 def delete_expired_chunks(cutoff: float) -> int:
     if not is_ready():
@@ -178,6 +214,7 @@ def delete_expired_chunks(cutoff: float) -> int:
     except Exception as e:
         print(f"delete_expired_chunks 失败: {e}")
         return 0
+
 
 # 返回指定 file_id 的切片数量
 def get_chunk_num(file_id: str) -> int:
@@ -196,6 +233,7 @@ def get_chunk_num(file_id: str) -> int:
     except Exception as e:
         print(f"get_chunk_num 失败: {e}")
         return 0
+
 
 # 根据 file_id 和分页参数取出对应 chunk，按 chunk_index 排序
 def get_chunk(file_id: str, page: int = 1, limit: int = 10) -> list[dict[str, Any]]:
@@ -235,6 +273,7 @@ def get_chunk(file_id: str, page: int = 1, limit: int = 10) -> list[dict[str, An
         print(f"get_chunk 失败: {e}")
         return []
 
+
 # 对每个 chunk 在法律表中检索相似法条（top_k=5）
 def retrieve_chunk(chunks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     if not is_ready():
@@ -255,6 +294,7 @@ def retrieve_chunk(chunks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         print(f"retrieve_chunk 失败: {e}")
         return []
 
+
 # 从批量查询结果中提取单条 query 的结果
 def _format_single(raw, idx: int) -> list[dict[str, Any]]:
     docs = raw.get("documents", [[]])[idx]
@@ -267,6 +307,7 @@ def _format_single(raw, idx: int) -> list[dict[str, Any]]:
 
 
 _law_parent_mod = None
+
 
 # 惰性按文件路径加载 law_parent_store，避免走 agents 包导入链
 def _load_law_parent_store():
@@ -282,6 +323,7 @@ def _load_law_parent_store():
     _law_parent_mod = mod
     return mod
 
+
 # 取子命中所属父 id（{file_id}_P{parent_index}）；无父信息返回 None。
 def _child_parent_id(hit: dict) -> str | None:
     meta = hit.get("metadata") or {}
@@ -290,6 +332,7 @@ def _child_parent_id(hit: dict) -> str | None:
     if file_id is None or parent_index is None:
         return None
     return f"{file_id}_P{parent_index}"
+
 
 # 把"命中的子模块"展开为对应父模块整段，供返回 LLM 使用
 def expand_to_parents(child_hits: list[dict], *, limit: int = 6) -> list[dict]:
@@ -342,6 +385,7 @@ def expand_to_parents(child_hits: list[dict], *, limit: int = 6) -> list[dict]:
     result.extend(passthrough)
     return result[:limit]
 
+
 # 对输入文本进行 embedding，在法律表中检索相关法律内容
 def retrieve_text(text: str, top_k: int = 5) -> list[dict[str, Any]]:
     if not is_ready():
@@ -350,7 +394,7 @@ def retrieve_text(text: str, top_k: int = 5) -> list[dict[str, Any]]:
             return []
 
     try:
-        query_embedding = _embedder.encode(text, normalize_embeddings=True).tolist()
+        query_embedding = _encode([text])[0]
         results = _laws_collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
@@ -360,6 +404,7 @@ def retrieve_text(text: str, top_k: int = 5) -> list[dict[str, Any]]:
     except Exception as e:
         print(f"retrieve_text 失败: {e}")
         return []
+
 
 # 将 Chroma 原生查询结果格式化为统一结构
 def _format_results(results) -> list[dict[str, Any]]:

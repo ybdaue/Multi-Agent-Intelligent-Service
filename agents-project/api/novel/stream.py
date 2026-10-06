@@ -19,7 +19,6 @@
 import re
 
 from agents.novel.utils.ledger import MARK, PROSE_MARK, TITLE_LINE
-from agents.novel.setup.settings import SettingScanner
 
 # 与 ledger.py 的 _PROSE / _MARK 同一套规则（那边是私有的，这边照抄样式；标记文字共用常量）。
 # 起点的两条正则：_PROSE_LINE 要求标记在行首（含流的最开头），免得把分析里引用的
@@ -192,18 +191,46 @@ class ProseFilter:
 
 
 class SettingFilter:
-    """喂进开书 agent collect 节点的 token 文本，吐出 [(事件名, 数据), ...]。
+    """喂进开书 agent discuss 节点的 token 文本，吐出 [(事件名, 数据), ...]。
 
-    只有 token 一种事件：散文逐字发，标记块（用户看不见）一个字都不发 —— "哪儿是标记块的
-    起止"是整个交给 `settings.SettingScanner` 的，这里只管把发出来的散文包成事件。
-    开书 agent 的回复第一句就是人话，没有散文起点标记那回事。
+    只有 token 一种事件：散文逐字发，标记块（__SETTINGS__ 及其后的 JSON）一个字都不发。
     """
 
     def __init__(self) -> None:
-        self._scanner = SettingScanner()
+        self._buf = ""
+        self._done = False
 
     def feed(self, chunk: str) -> list[tuple[str, dict]]:
-        return [("token", {"text": text}) for text in self._scanner.feed(chunk)]
+        if self._done:
+            return []
+        self._buf += chunk or ""
+        # 查找 __SETTINGS__ 标记
+        idx = self._buf.find("__SETTINGS__")
+        if idx >= 0:
+            before = self._buf[:idx]
+            self._buf = ""
+            self._done = True
+            if before:
+                return [("token", {"text": before})]
+            return []
+        # 还没碰到标记：全量发（标记最多被切成两半的边界情况：尾巴 12 字符扣住不放）
+        hold = 12
+        if len(self._buf) > hold:
+            safe = self._buf[:len(self._buf) - hold]
+            self._buf = self._buf[len(self._buf) - hold:]
+            if safe:
+                return [("token", {"text": safe})]
+        return []
 
     def flush(self) -> list[tuple[str, dict]]:
-        return [("token", {"text": text}) for text in self._scanner.finish()]
+        if self._done:
+            return []
+        # 流结束还没见着 __SETTINGS__：把扣住的都发出去
+        text = self._buf
+        self._buf = ""
+        idx = text.find("__SETTINGS__")
+        if idx >= 0:
+            text = text[:idx]
+        if text:
+            return [("token", {"text": text})]
+        return []

@@ -105,8 +105,9 @@ def _chunk_text(chunk) -> str:
     return ""
 
 
-def _config(user_id: str, novel_id: str, chapter_id: str = "") -> dict:
+def _config(user_id: str, novel_id: str, chapter_id: str = "", callbacks: Optional[list] = None) -> dict:
     return {
+        "callbacks": callbacks,
         "configurable": {
             "thread_id": novel_id,
             "novel_id": novel_id,
@@ -421,7 +422,7 @@ def _settle_later(user_id: str, novel_id: str, status: str) -> None:
     task.add_done_callback(_settle_tasks.discard)
 
 
-def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input) -> StreamingResponse:
+def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input, callbacks: Optional[list] = None) -> StreamingResponse:
     """把一轮图跑成 SSE。
 
     事件：session / stage / target / prose_start / token / question / final / error / done。
@@ -436,7 +437,7 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input) -> Stream
     三条流各司其职：messages 出正文 token，tasks 出状态行（任务开跑就报），updates 接
     interrupt（只有它接得到）与 target（只有它发得出来）。
     """
-    config = _config(user_id, novel_id, chapter_id)
+    config = _config(user_id, novel_id, chapter_id, callbacks)
 
     async def event_stream():
         yield _event("session", {"threadId": novel_id})
@@ -588,6 +589,7 @@ async def call_novel_agent(
         return _sse_pending(novelId, pending)
 
     written = await add_inspirations(novelId, await _inspirations(inspirations, files))
+    handler = getattr(request.state, "token_collector", None)
     return _sse(
         user_id=user_id,
         novel_id=novelId,
@@ -597,6 +599,7 @@ async def call_novel_agent(
             "user_message": text,
             "inspirations": written,
         },
+        callbacks=[handler] if handler else None,
     )
 
 

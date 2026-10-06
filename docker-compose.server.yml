@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: demo
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+
+  chroma:
+    image: chromadb/chroma:1.5.10.dev227
+    ports:
+      - "8000:8000"
+    volumes:
+      - chromadata:/data
+
+  agents-api:
+    image: nextjs-agents-api:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_ENV=production
+      - postgreSQL_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/demo
+      - redis_URL=redis://redis:6379/0
+      - CHROMA_SERVER_HOST=chroma
+      - EMBED_MODE=api
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
+      - ZHIPU_API_KEY=${ZHIPU_API_KEY}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      chroma:
+        condition: service_started
+
+  nextjs:
+    image: nextjs-nextjs:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/demo
+      - NEXT_PUBLIC_BETTER_AUTH_URL=http://${SERVER_IP:-localhost}:3000
+      - NEXT_PUBLIC_API_URL=http://agents-api:8080
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+      - TICKFLOW_KEY=${TICKFLOW_KEY}
+      - NODE_ENV=production
+    depends_on:
+      - postgres
+      - agents-api
+
+volumes:
+  pgdata:
+  chromadata:
+  redisdata:

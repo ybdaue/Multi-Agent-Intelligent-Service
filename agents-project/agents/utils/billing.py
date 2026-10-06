@@ -1,17 +1,21 @@
-"""Token 计费核心：per-request contextvars 累加器 + 结算逻辑。
+"""Token 计费核心：TokenCollectorHandler + 结算逻辑。
 
 用法：
-  1. FastAPI middleware 调用 start_request_billing() 开启累加
-  2. _ChatOpenAI hook 自动调用 record_llm_call() 采集
-  3. Middleware finally 调用 collect_request_usage() 取走数据
-  4. 调用 settle_billing() 完成定价查询 + 写入记录 + 扣费
+  1. FastAPI middleware 创建 TokenCollectorHandler 放 request.state
+  2. 端点把 handler 注入 LangGraph config.callbacks
+  3. LangChain 回调 on_llm_end 自动采集 token 到 handler
+  4. 流结束后 middleware 调 handler.get_calls() 取数据
+  5. 调用 settle_billing() 完成定价查询 + 写入记录 + 扣费
 """
 
-import contextvars
+import asyncio
 import math
 import uuid
 import datetime
 from dataclasses import dataclass, field
+
+from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.outputs import LLMResult
 
 
 # ── 数据结构 ─────────────────────────────────────────────────
@@ -33,17 +37,41 @@ class LLMCallRecord:
     usage: TokenUsage = field(default_factory=TokenUsage)
 
 
-# ── contextvars 累加器 ─────────────────────────────────────
+# ── LangChain Callback 采集器 ────────────────────────────
 
-# 每个请求独立的 LLM 调用记录列表；None 表示不计费模式
-_current_request_calls: contextvars.ContextVar[list[LLMCallRecord] | None] = (
-    contextvars.ContextVar("_billing_calls", default=None)
-)
+class TokenCollectorHandler(AsyncCallbackHandler):
+    """LangChain AsyncCallbackHandler，通过 on_llm_end 采集所有 LLM 调用 token。
 
+    LangGraph 会通过 config.callbacks 将本 handler 传播到所有子图、
+    工具调用和内部 Task，因此可以捕获一条请求中全部的 LLM 调用
+   （意图识别、决策、扫描批次、归并、总结等），不受 asyncio Task 隔离影响。
+    """
 
-def start_request_billing() -> None:
-    """在 FastAPI 请求入口调用：建立新的空累加器。"""
-    _current_request_calls.set([])
+    def __init__(self):
+        super().__init__()
+        self.calls: list[LLMCallRecord] = []
+
+    async def on_llm_end(self, response: LLMResult, *, run_id: str, **kwargs) -> None:
+        for gens in response.generations:
+            for gen in gens:
+                msg = getattr(gen, "message", None)
+                if msg is None:
+                    continue
+                meta = getattr(msg, "usage_metadata", None)
+                if not meta:
+                    continue
+                resp_meta = getattr(msg, "response_metadata", None) or {}
+                self.calls.append(LLMCallRecord(
+                    provider=resp_meta.get("model_provider", "") or "",
+                    model_name=resp_meta.get("model_name", "") or "",
+                    usage=TokenUsage(
+                        input_tokens=meta.get("input_tokens", 0),
+                        output_tokens=meta.get("output_tokens", 0),
+                    ),
+                ))
+
+    def get_calls(self) -> list[LLMCallRecord]:
+        return self.calls
 
 
 def record_llm_call(
@@ -52,30 +80,8 @@ def record_llm_call(
     input_tokens: int,
     output_tokens: int,
 ) -> None:
-    """由 _ChatOpenAI hook 在每次 LLM 调用完成后调用。
-
-    如果当前不在计费请求中（context 未设或为 None），静默跳过。
-    """
-    calls = _current_request_calls.get()
-    if calls is None:
-        return  # 不计费模式（如测试/离线脚本等无 middleware 的环境）
-    calls.append(
-        LLMCallRecord(
-            provider=provider,
-            model_name=model_name,
-            usage=TokenUsage(input_tokens, output_tokens),
-        )
-    )
-
-
-def collect_request_usage() -> list[LLMCallRecord] | None:
-    """在请求处理完成后调用：取走并清空累加器。
-
-    返回 None 表示不计费模式。
-    """
-    calls = _current_request_calls.get()
-    _current_request_calls.set(None)
-    return calls
+    """(已弃用) 由 TokenCollectorHandler 替代，保留为空函数避免 _ChatOpenAI 调用报错。"""
+    pass
 
 
 # ── 余额预检 ────────────────────────────────────────────────
@@ -299,127 +305,104 @@ async def settle_billing(
     request_path: str = "",
     thread_id: str = "",
 ) -> None:
-    """完整结算流程：遍历所有 LLM 调用 -> 查定价 -> 写 billing_record -> 套餐抵扣 -> 乐观锁扣余额。
+    """完整结算流程：按 (provider, model) 分组计算定价 → 写一条汇总 billing_record。
 
-    在 asyncio.create_task 中异步执行（不阻塞响应）。
-    如果某次扣费乐观锁冲突，最多重试 MAX_RETRY 次。
+    BillingRecord 不存模型级明细，只存聚合后的总 token 和总费用。
+    模型级定价计算在内部完成。
     """
     if not calls:
         return
 
+    from collections import defaultdict
+
+    # ── 按 (provider, model) 分组（用于定价计算） ──
+    groups: dict[tuple[str, str], TokenUsage] = defaultdict(TokenUsage)
+    for c in calls:
+        key = (c.provider, c.model_name)
+        groups[key].input_tokens += c.usage.input_tokens
+        groups[key].output_tokens += c.usage.output_tokens
+
+    # ── 打印汇总 ──
+    total_in = sum(c.usage.input_tokens for c in calls)
+    total_out = sum(c.usage.output_tokens for c in calls)
+    print(
+        f"[billing] {service_type} 请求共 {len(calls)} 次 LLM 调用，"
+        f"总计 {total_in} in / {total_out} out"
+    )
+
     from api.utils.db import pg_pool
 
     async with pg_pool.connection() as conn:
-        for call in calls:
-            plan_deducted = 0
-            plan_id = None
-            remaining_input = call.usage.input_tokens
-            remaining_output = call.usage.output_tokens
+        total_plan_deducted = 0
+        total_balance_cost = 0
+        final_plan_id = None
 
-            # 先尝试套餐抵扣
-            plan_deducted, remaining_input, remaining_output, plan_id = (
-                await deduct_from_plan(
-                    conn,
-                    user_id,
-                    service_type,
-                    call.provider,
-                    call.model_name,
-                    call.usage.input_tokens,
-                    call.usage.output_tokens,
-                )
+        for (provider, model_name), usage in groups.items():
+            # 按模型定价计算套餐抵扣
+            deducted, rem_in, rem_out, pid = await deduct_from_plan(
+                conn, user_id, service_type, provider, model_name,
+                usage.input_tokens, usage.output_tokens,
             )
+            total_plan_deducted += deducted
+            if pid:
+                final_plan_id = pid
 
-            # 计算套餐未覆盖部分的费用
-            if remaining_input > 0 or remaining_output > 0:
-                input_cost, output_cost, total_cost = await calculate_cost(
-                    conn,
-                    service_type,
-                    call.provider,
-                    call.model_name,
-                    remaining_input,
-                    remaining_output,
+            # 按模型定价计算费用
+            if rem_in > 0 or rem_out > 0:
+                _, _, cost = await calculate_cost(
+                    conn, service_type, provider, model_name,
+                    rem_in, rem_out,
                 )
-            else:
-                input_cost, output_cost, total_cost = 0, 0, 0
+                total_balance_cost += cost
 
-            # 乐观锁扣费（带重试）
-            balance_after = 0
-            if total_cost > 0:
-                for attempt in range(MAX_RETRY):
-                    success, balance = await deduct_balance(conn, user_id, total_cost)
-                    if success:
-                        balance_after = balance
-                        break
-                    if attempt < MAX_RETRY - 1:
-                        import asyncio
-                        await asyncio.sleep(0.05)
-                else:
-                    balance_after = 0
+        # 汇总后一次性扣余额
+        balance_after = 0
+        if total_balance_cost > 0:
+            for attempt in range(MAX_RETRY):
+                success, balance = await deduct_balance(conn, user_id, total_balance_cost)
+                if success:
+                    balance_after = balance
+                    break
+                if attempt < MAX_RETRY - 1:
+                    import asyncio
+                    await asyncio.sleep(0.05)
             else:
-                # 全由套餐覆盖，查余额展示
-                cur = await conn.execute(
-                    'SELECT balance FROM "BillingAccount" WHERE "userId" = %s',
-                    (user_id,),
-                )
-                row = await cur.fetchone()
-                balance_after = row[0] if row else 0
-
-            # 写 billing_record（保留完整 token 数和套餐信息）
-            total_input_cost, total_output_cost, total_real_cost = await calculate_cost(
-                conn,
-                service_type,
-                call.provider,
-                call.model_name,
-                call.usage.input_tokens,
-                call.usage.output_tokens,
+                balance_after = 0
+        else:
+            cur = await conn.execute(
+                'SELECT balance FROM "BillingAccount" WHERE "userId" = %s',
+                (user_id,),
             )
-            record_id = uuid.uuid4().hex
+            row = await cur.fetchone()
+            balance_after = row[0] if row else 0
+
+        # 写入一条汇总 billing_record（不存模型字段）
+        record_id = uuid.uuid4().hex
+        await conn.execute(
+            """INSERT INTO "BillingRecord"
+               ("id", "userId", "serviceType",
+                "inputTokens", "outputTokens", "totalTokens",
+                "totalCost", "balanceAfter", "requestPath", "threadId",
+                "planId", "planDeductedTokens", "balanceDeductedCost")
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (
+                record_id, user_id, service_type,
+                total_in, total_out, total_in + total_out,
+                total_balance_cost, balance_after, request_path, thread_id,
+                final_plan_id, total_plan_deducted, total_balance_cost,
+            ),
+        )
+
+        # 套餐使用明细
+        if final_plan_id and total_plan_deducted > 0:
             await conn.execute(
-                """INSERT INTO "BillingRecord"
-                   ("id", "userId", "serviceType", "provider", "modelName",
-                    "inputTokens", "outputTokens", "totalTokens",
-                    "inputCost", "outputCost", "totalCost",
-                    "balanceAfter", "requestPath", "threadId",
-                    "planId", "planDeductedTokens", "balanceDeductedCost")
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (
-                    record_id,
-                    user_id,
-                    service_type,
-                    call.provider,
-                    call.model_name,
-                    call.usage.input_tokens,
-                    call.usage.output_tokens,
-                    call.usage.total,
-                    total_input_cost,
-                    total_output_cost,
-                    total_real_cost,
-                    balance_after,
-                    request_path,
-                    thread_id,
-                    plan_id,
-                    plan_deducted,
-                    total_cost,
-                ),
+                """INSERT INTO "PlanTokenUsage"
+               ("id", "userPlanId", "billingRecordId", "modelName",
+                "inputTokens", "outputTokens", "deductedTokens")
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (uuid.uuid4().hex, final_plan_id, record_id, "",
+                 total_in, total_out, total_plan_deducted),
             )
-
-            # 写套餐使用明细
-            if plan_id and plan_deducted > 0:
-                    await conn.execute(
-                        """INSERT INTO "PlanTokenUsage"
-                       ("id", "userPlanId", "billingRecordId", "modelName",
-                        "inputTokens", "outputTokens", "deductedTokens")
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                        (
-                            uuid.uuid4().hex,
-                            plan_id,
-                            record_id,
-                            call.model_name,
-                            call.usage.input_tokens,
-                            call.usage.output_tokens,
-                            plan_deducted,
-                        ),
-                    )
 
 
 # ── 订阅套餐自动续费 ───────────────────────────────────────

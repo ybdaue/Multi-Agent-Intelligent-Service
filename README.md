@@ -107,7 +107,7 @@ docker compose exec nextjs npx prisma migrate deploy
 # PostgreSQL 16
 docker run -d --name pg \
   -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=123456 \
+  -e POSTGRES_PASSWORD=your_strong_password \
   -e POSTGRES_DB=demo \
   -p 5432:5432 \
   postgres:16
@@ -177,7 +177,7 @@ npx prisma migrate deploy
 |------|------|
 | `DATABASE_URL` | PostgreSQL 连接串 |
 | `NEXT_PUBLIC_API_URL` | Agent 后端地址 |
-| `NEXT_PUBLIC_BETTER_AUTH_URL` | 认证服务地址 |
+| `NEXT_PUBLIC_BETTER_AUTH_URL` | 认证服务地址（docker-compose 中默认 `${SERVER_IP:-localhost}`） |
 | `APIKEY` | AI SDK API Key |
 
 ### agents-project

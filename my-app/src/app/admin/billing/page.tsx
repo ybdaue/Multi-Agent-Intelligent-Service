@@ -64,8 +64,6 @@ export default function AdminBillingPage() {
       title: "服务", dataIndex: "serviceType", width: 80,
       render: (v: string) => <Tag color={serviceColors[v]}>{serviceLabels[v] ?? v}</Tag>,
     },
-    { title: "供应商", dataIndex: "provider", width: 80 },
-    { title: "模型", dataIndex: "modelName", width: 140, ellipsis: true },
     {
       title: "输入 tokens", dataIndex: "inputTokens", width: 100,
       render: (v: number) => v.toLocaleString(),

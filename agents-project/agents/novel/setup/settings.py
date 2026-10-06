@@ -15,12 +15,12 @@ from ..utils.ledger import NEW_ENTITY_SPEC, normalize_new
 from ..utils.novel_information import render_protagonists
 
 SETTING_FIELDS: tuple[str, ...] = (
-    "novel_title",
     "novel_tropes",
     "novel_style",
     "novel_protagonists",
     "novel_outlines",
     "novel_world_rules",
+    "novel_title",
 )
 
 # 说人话时用的名字。brief 里报"还差哪几项"、confirm 列出整份设定，都用这个。
@@ -31,6 +31,93 @@ SETTING_LABELS: dict[str, str] = {
     "novel_protagonists": "主角（姓名、性别、身份、性格、金手指或核心能力、反差点）",
     "novel_outlines": "核心冲突",
     "novel_world_rules": "世界观 / 等级力量体系",
+}
+
+# 设定项之间的依赖关系：键改动时，值列表里的项也受牵连需要重议。
+DEPENDENCIES: dict[str, list[str]] = {
+    "novel_tropes": ["novel_outlines", "novel_world_rules"],
+    "novel_world_rules": ["novel_outlines"],
+    "novel_protagonists": ["novel_outlines"],
+}
+
+# collect_sub 子图内 discuss 节点用的精简提示词：只告诉模型当前在定哪一项、目的、
+# 可参考的备选值，不再携带整份六项设定。
+FIELD_PROMPTS: dict[str, str] = {
+    "novel_title": """当前在定【书名】。用户对书名的想法可能很模糊（一个词、一种感觉），
+你的任务是通过聊天帮他把书名敲定下来。
+
+给选项：如果用户说不出具体书名，给 3-5 个跟他题材匹配的书名选项让他挑。
+如果他说了一个方向（比如「末世相关的」），就顺着那个方向拟几个具体的。
+
+书名不需要很长，2-6 个字最好，要有辨识度、好记。
+用户确认了就行，不用反复确认。""",
+
+    "novel_tropes": """当前在定【小说套路（情绪标签 + 题材 + 爽点模式）】。
+这是读者搜书时最先看到的东西，决定书的定位。
+
+情绪标签（决定算法推荐）：打脸爽文 / 极致虐恋 / 爆笑反套路 / 悬疑惊悚 / 治愈甜宠 / 脑洞大开 / 热血 / 虐心
+题材：末世 / 修仙 / 游戏 / 历史 / 都市异能 / 科幻 / 悬疑推理 / 现代言情 / 古代言情 / 奇幻玄幻 / 武侠仙侠 / 历史架空 / 都市现实
+爽点模式：重生打脸 / 扮猪吃虎 / 升级碾压 / 经营建造 / 越级挑战 / 身份揭秘 / 退婚打脸 / 拍卖会装逼
+
+给出完整的三件套组合让用户确认。如果他只说了题材，你补上常见的情绪标签和爽点模式。
+如果他说的组合不常见但有意思，也可以保留。
+
+	注意：用标签和概念举例，不要举具体书名的例子。""",
+
+    "novel_style": """当前在定【小说风格（叙事节奏 + 语言风格）】。
+
+叙事节奏：快节奏（每章一个小高潮）/ 慢热铺垫 / 张弛有度 等
+语言风格：轻松诙谐 / 严肃正剧 / 文笔细腻 / 口语化 等
+
+给用户几个常见组合选项，或者让他说个感觉你来匹配。风格要和题材搭配——末世配快节奏+口语化，
+修仙配慢热+文笔细腻这样。
+
+	注意：用风格标签搭配来说明，不要拿具体书名做例子。""",
+
+    "novel_protagonists": """当前在定【主角】。需要确定：姓名、性别、身份、性格、
+金手指或核心能力、反差点。
+
+主角原型参考：英雄型（勇敢正义）/ 成长型（从弱小到强大）/ 反英雄型（道德灰色）/ 平凡型（普通人卷入非凡事）
+常见反差点：表面摆烂实际卷王 / 社恐被迫打脸 / 被虐后觉醒反杀 / 老实人黑化 / 隐藏大佬装萌新 / 看似废柴实天赋异禀
+
+可以一次问几项，但每一项都要有明确的答案再定下来。
+用户说「随便」时，按题材给一个完整的主角设定让他确认。
+主角可以不止一个（双主角/群像），但要确保每个都有名字和核心特征。
+
+最终确认时把完整的主角信息汇总给他看。
+
+	注意：用角色原型标签来举例，不要用具体小说里的角色名或书名当例子。""",
+
+    "novel_outlines": """当前在定【核心冲突】—— 整个故事最根本的矛盾和驱动力。
+
+核心冲突类型参考：生死存亡 / 查明真相 / 爱情阻碍 / 复仇雪恨 / 权力争夺 / 成长突破 / 守护保护
+
+这是六项里最难定的一项，需要反复聊透：
+1. 先理解前面定好的套路、主角、世界观，冲突要跟它们匹配
+2. 给 2-3 个冲突方向让用户挑（比如「末世重生」配「复仇+生存vs.人性考验」）
+3. 如果他都不满意，继续聊：问他「那你觉得主角最大的对手应该是什么？」引导他说出念头
+4. 他说的方向你扩成一个完整的冲突描述，让他确认
+
+核心冲突要具体：不只是「打怪升级」，而是「在丧尸围城的末世里，主角带着前世记忆
+不仅要活下去，还要找到前世背叛自己的真相」。
+
+	注意：用概念描述冲突方向，不要用具体小说情节或书名做例子。""",
+
+    "novel_world_rules": """当前在定【世界观 / 等级力量体系】。
+
+需要定的是：世界观背景设定、如果有力量体系要定等级框架、主要势力格局。
+
+如果题材是现代的（都市/悬疑），力量体系可以没有或很弱，重点是世界观氛围和规则。
+如果题材是玄幻/修仙/游戏，力量体系是重点——等级名称、突破方式、力量来源。
+
+给用户选项时按题材来：
+- 修仙：练气→筑基→金丹→元婴→化神 这类
+- 末世：异能觉醒→等级进阶 这类
+- 游戏：职业体系+技能树 这类
+
+世界规则可以多条，每条一个命名。
+
+	注意：用概念描述世界观类型，不要用具体小说的世界观做例子。""",
 }
 
 # 列表那三项（主角 / 核心冲突 / 世界规则）退成散文时，整段进哪一列。正常走的是
@@ -74,9 +161,27 @@ _FIELD_BY_LABEL.update({field: field for field in SETTING_FIELDS})
 
 
 def wrap_setting(field: str, content: str) -> object:
-    """把一项设定包成 novel 里的存法。"""
+    """把一项设定包成 novel 里的存法。
+
+    标量字段（书名/套路/风格）直接存字符串。列表字段（主角/冲突/世界观）包成 [{key: content}]，
+    对主角额外从文本中提取 name 字段，避免入库时显示"未命名"。
+    """
     key = ITEM_KEY.get(field)
-    return [{key: content}] if key else content
+    if not key:
+        return content
+    entry: dict[str, str] = {key: content}
+    if field == "novel_protagonists":
+        m = re.search(r"姓名[：:]\s*([^；，、\n\r]+)", content)
+        entry["name"] = m.group(1).strip() if m else content.split("；")[0].split("，")[0].strip()[:20]
+        if m:
+            # description 里去掉"姓名：xxx"前缀，只保留详细信息
+            tail = content[m.end():].strip().lstrip("；，、").strip()
+            if tail:
+                entry["description"] = tail
+    elif field == "novel_world_rules":
+        name = content.split("：")[0].split("→")[0].split("：")[0].strip()[:20]
+        entry["name"] = name if name else content[:20]
+    return [entry]
 
 
 def _json_items(content: str) -> list[dict] | None:

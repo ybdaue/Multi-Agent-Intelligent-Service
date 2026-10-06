@@ -127,7 +127,7 @@ async def _ensure_default_plans():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:  # 启动时：尝试初始化 RAG，失败不阻塞
+    try:  # 启动时：尝试初始化 RAG（本地模型→失败则 API 降级），失败不阻塞
         RAG.init()
     except Exception:
         pass
@@ -172,6 +172,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="智能体 API", version="0.1.0", lifespan=lifespan)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

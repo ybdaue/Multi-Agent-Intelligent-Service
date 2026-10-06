@@ -34,7 +34,7 @@ export async function getOverview() {
 export async function getRecords(
   page: number = 1,
   pageSize: number = 20,
-  filters?: { dateFrom?: string; dateTo?: string; serviceType?: string; modelName?: string },
+  filters?: { dateFrom?: string; dateTo?: string; serviceType?: string },
 ) {
   const userId = await requireUser();
   const where: Record<string, unknown> = { userId };
@@ -45,7 +45,7 @@ export async function getRecords(
     where.createdAt = createdAt;
   }
   if (filters?.serviceType) where.serviceType = filters.serviceType;
-  if (filters?.modelName) where.modelName = filters.modelName;
+  if (filters?.serviceType) where.serviceType = filters.serviceType;
 
   const [total, records] = await Promise.all([
     prisma.billingRecord.count({ where }),
@@ -55,9 +55,9 @@ export async function getRecords(
       skip: (page - 1) * pageSize,
       take: pageSize,
       select: {
-        id: true, serviceType: true, provider: true, modelName: true,
+        id: true, serviceType: true,
         inputTokens: true, outputTokens: true, totalTokens: true,
-        inputCost: true, outputCost: true, totalCost: true,
+        totalCost: true,
         balanceAfter: true, requestPath: true, createdAt: true,
       },
     }),

@@ -1,8 +1,9 @@
 """登录态校验：从 Authorization 头解析 Bearer token，换算成 userId。
 
 策略：Redis 缓存优先（decode_responses=True 所以取到的是 str）；
+命中时滑动续期（续 1h），活跃用户 Redis 不过期；
 未命中回退 PostgreSQL 查 Session 表，有效会话会把 token→userId
-按剩余时间（封顶 600s）写回缓存，减少后续请求打库。
+按剩余时间（封顶 2h）写回缓存。
 """
 from datetime import datetime, timezone
 
@@ -30,35 +31,48 @@ async def resolve_user_id(token: str):
         user_id = await redis_client.get(token)
     except Exception:
         pass
-    if user_id is None:
+    if user_id is not None:
+        # 缓存命中 → 滑动续期，活跃用户 Redis 不过期
         try:
-            async with pg_pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        'SELECT "userId", "expiresAt" FROM "Session" WHERE "token" = %s',
-                        (token,),
-                    )
-                    row = await cur.fetchone()
-        except Exception:
-            return None
-
-        if row is None:
-            return None
-
-        id_, expires_at = row
-        remain = session_remaining_seconds(expires_at)
-        if remain <= 0:
-            return None
-        user_id = id_
-        try:
-            await redis_client.set(token, user_id, ex=max(1, min(remain, 600)))
+            await redis_client.expire(token, 3600)
         except Exception:
             pass
+        return user_id
+
+    try:
+        async with pg_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    'SELECT "userId", "expiresAt" FROM "Session" WHERE "token" = %s',
+                    (token,),
+                )
+                row = await cur.fetchone()
+    except Exception:
+        return None
+
+    if row is None:
+        return None
+
+    id_, expires_at = row
+    remain = session_remaining_seconds(expires_at)
+    if remain <= 0:
+        return None
+    user_id = id_
+    try:
+        # 按剩余时间缓存，封顶 2h（session 最大生命周期）
+        await redis_client.set(token, user_id, ex=max(1, min(remain, 7200)))
+    except Exception:
+        pass
     return user_id
 
 
 async def auth_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # 健康检查 / docs / openapi 不校验登录
+    path = request.url.path
+    if path in ("/health", "/docs", "/openapi.json"):
         return await call_next(request)
 
     auth_header = request.headers.get("Authorization", "")

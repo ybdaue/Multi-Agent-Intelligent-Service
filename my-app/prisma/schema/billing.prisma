@@ -16,13 +16,9 @@ model BillingRecord {
   id           String   @id @default(cuid())
   userId       String
   serviceType  String   // novel / legal / finance / chat
-  provider     String   // qwen / deepseek / openai ...
-  modelName    String   // deepseek-v4-flash 等实际模型名
   inputTokens  Int
   outputTokens Int
   totalTokens  Int
-  inputCost    Int      // 输入费用（分）
-  outputCost   Int      // 输出费用（分）
   totalCost    Int      // 总费用（分）
   balanceAfter Int      // 扣费后余额（分）
   requestPath  String?  // API path，如 /api/novel/agent/run

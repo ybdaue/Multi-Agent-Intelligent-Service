@@ -7,7 +7,6 @@ import { Typography } from "antd";
 import TimeRangeSelector from "./_components/TimeRangeSelector";
 import StatCards from "./_components/StatCards";
 import ChartSection from "./_components/ChartSection";
-import ModelRankingTable from "./_components/ModelRankingTable";
 import UserTopTable from "./_components/UserTopTable";
 import PlanRankingTable from "./_components/PlanRankingTable";
 import ServiceRankingTable from "./_components/ServiceRankingTable";
@@ -38,13 +37,12 @@ export default function AdminDashboard() {
       {timeContext.range !== "total" && <ChartSection timeContext={timeContext} />}
 
       <div className={styles.tableGrid}>
-        <ModelRankingTable timeContext={timeContext} />
         <UserTopTable timeContext={timeContext} />
+        <ServiceRankingTable timeContext={timeContext} />
       </div>
 
       <div className={styles.tableGrid}>
         <PlanRankingTable timeContext={timeContext} />
-        <ServiceRankingTable timeContext={timeContext} />
       </div>
     </div>
   );

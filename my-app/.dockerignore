@@ -1,3 +1,9 @@
 .next
 .next-docker
 node_modules
+.env
+.env.*
+.git
+.gitignore
+Dockerfile*
+README.md

@@ -135,9 +135,12 @@ CONSOLIDATE_PROMPT = """你是一位资深法律风险审查专家。下面是�
 - risk_score：high（3个以上 high 风险或1个致命问题）、medium（有 medium 风险）、low（仅有少量 low 风险或无风险）
 - summary：指出文档存在的主要法律问题领域和整体风险水平
 
+# 输出格式（只输出一个 JSON 对象，不要输出解释性文字）
+{{"summary": "文档整体风险评估摘要", "risk_score": "high", "risks": [{{"risk_type": "违约责任缺陷", "risk_level": "high", "sentence": "原文", "issue": "具体风险说明", "suggestion": "修改建议", "legal_basis": "法律依据", "affected_chunks": [0, 3]}}]}}
+
 # 输出约束
+- 根字段必须是 summary / risk_score / risks 三个，禁止使用其他字段名（如 merged_risks）
 - 禁止输出任何解释性文字
-- 只输出结构化 JSON
 - summary、风险描述必须使用中文"""
 
 
@@ -164,7 +167,7 @@ PAGE_SIZE = 30
 # parse.py 已保证切片正文 ≤ 700 字（DEFAULT_CHUNK_SIZE），单切片成本以法条为主，预算可适当放大
 MAX_BATCH_CHARS = 10000
 # 单批最多切片数：限制单次调用的输出复杂度，避免风险归因混乱
-MAX_BATCH_CHUNKS = 5
+MAX_BATCH_CHUNKS = 10
 # 每个用户切片法律依据展开的父模块上限（父文本较肥，取前几块保整父语义即可）
 LAW_PARENT_PER_CHUNK = 2
 # 原始风险点不超过该数量时，跳过 LLM 归并，用代码直接汇总（省一次 LLM 调用约 20~25s）

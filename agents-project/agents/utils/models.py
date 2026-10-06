@@ -125,13 +125,32 @@ class _ChatOpenAI(ChatOpenAI):
             raise
 
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        """流式底层：逐块 yield 并在流结束后采集 usage_metadata 记录计费。
+
+        ChatOpenAI._astream 仅作路由转发（Chat Completions / Responses API），
+        不做计费采集。_agenerate_with_cache 调用此方法（走 _should_stream 分支时），
+        若 _collect_usage 未被触发，会漏记 token → 在此补充采集。
+        """
         self._log_request(messages)
+        final_usage = None
         try:
             async for chunk in super()._astream(messages, stop=stop, run_manager=run_manager, **kwargs):
+                # ChatGenerationChunk → AIMessageChunk → usage_metadata
+                msg = getattr(chunk, "message", None)
+                meta = getattr(msg, "usage_metadata", None) if msg else None
+                if meta:
+                    final_usage = meta
                 yield chunk
         except Exception:
             print(f"[llm] 流式请求失败 model={self._label}: {_format_request(messages)}")
             raise
+        if final_usage:
+            from .billing import record_llm_call
+            record_llm_call(
+                provider=self._provider_name, model_name=self._label,
+                input_tokens=final_usage.get("input_tokens", 0),
+                output_tokens=final_usage.get("output_tokens", 0),
+            )
 
     async def astream(self, input, config=None, *, stop=None, **kwargs):
         """流式调用，在流结束后采集 usage_metadata 记录计费。
@@ -177,6 +196,10 @@ class _ChatOpenAI(ChatOpenAI):
         result = super()._create_chat_result(response, generation_info)
         for generation in result.generations:
             message = generation.message
+            # 修正 model_provider：ChatOpenAI 对所有兼容 API 都硬编码 "openai"
+            resp_meta = getattr(message, "response_metadata", None) or {}
+            if self._provider_name and resp_meta.get("model_provider") != self._provider_name:
+                resp_meta["model_provider"] = self._provider_name
             if getattr(message, "invalid_tool_calls", None):
                 finish_reason = (generation.generation_info or {}).get("finish_reason")
                 print(f"[llm] invalid_tool_calls={len(message.invalid_tool_calls)} finish_reason={finish_reason!r}")

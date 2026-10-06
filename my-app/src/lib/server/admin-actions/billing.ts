@@ -33,7 +33,7 @@ export async function getBillingRecords(params?: {
       skip: (page - 1) * pageSize,
       take: pageSize,
       select: {
-        id: true, userId: true, serviceType: true, provider: true, modelName: true,
+        id: true, userId: true, serviceType: true,
         inputTokens: true, outputTokens: true, totalTokens: true, totalCost: true,
         balanceAfter: true, balanceDeductedCost: true, planDeductedTokens: true,
         requestPath: true, createdAt: true,

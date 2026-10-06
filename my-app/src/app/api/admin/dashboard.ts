@@ -3,7 +3,6 @@ import type {
   TrendItem,
   ServiceDistribution,
   RecentBillingItem,
-  ModelRankingItem,
   UserTopItem,
   PlanRankingItem,
   TimeContext,
@@ -41,10 +40,6 @@ export function fetchTrends(ctx: TimeContext): Promise<TrendItem[]> {
 export function fetchDistribution(ctx: TimeContext): Promise<ServiceDistribution[]> {
   if (ctx.range === "total") return Promise.resolve([]);
   return fetchJson(`/api/admin/dashboard/distribution?${buildQuery(ctx)}`);
-}
-
-export function fetchModelRanking(ctx: TimeContext): Promise<ModelRankingItem[]> {
-  return fetchJson(`/api/admin/dashboard/model-ranking?${buildQuery(ctx)}`);
 }
 
 export function fetchUserTop(ctx: TimeContext): Promise<UserTopItem[]> {

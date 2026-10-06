@@ -9,7 +9,7 @@ const configInit = () => {
     reactCompiler: true,
     reactStrictMode: true,
     devIndicators: false,
-    allowedDevOrigins: ["26.41.157.27"],
+    allowedDevOrigins: ["localhost", "26.41.157.27"],
     async rewrites() {
       return [
         {

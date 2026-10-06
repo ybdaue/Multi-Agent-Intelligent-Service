@@ -122,6 +122,7 @@ async def _stream_agent(
     file: Optional[UploadFile],
     produce_summary: bool = False,
     answer_nodes: Optional[set[str]] = None,
+    callbacks: Optional[list] = None,
 ) -> StreamingResponse:
     """按 agent 名称流式执行，SSE 事件与 /multiAgent 完全一致。
 
@@ -142,11 +143,12 @@ async def _stream_agent(
         userId=userId, threadId=tid, text=text, file=file
     )
     config = {
+        "callbacks": callbacks,
         "configurable": {
             "thread_id": tid,
             "userId": userId,
             "produce_summary": produce_summary,
-        }
+        },
     }
 
     async def event_stream():
@@ -268,6 +270,7 @@ async def call_agent(
     text: str = Form(...),
     file: Optional[UploadFile] = File(None),
 ):
+    handler = getattr(request.state, "token_collector", None)
     return await _stream_agent(
         agent_name="multiAgent",
         userId=request.state.user_id,
@@ -275,6 +278,7 @@ async def call_agent(
         text=text,
         file=file,
         produce_summary=False,
+        callbacks=[handler] if handler else None,
     )
 
 
@@ -290,6 +294,7 @@ async def call_legal_agent(
     userId 由全局 auth 中间件从 Bearer token 解析后写入 request.state（better-auth 的 cuid），
     不再由前端 query 传入 —— 它就是 checkpoint / agent_store / user_session / temp_file 的隔离 key。
     """
+    handler = getattr(request.state, "token_collector", None)
     return await _stream_agent(
         agent_name="legalAgent",
         userId=request.state.user_id,
@@ -299,6 +304,7 @@ async def call_legal_agent(
         produce_summary=True,
         # legal 图的用户可见输出：assistant 出纯闲聊答复，summary 出任务终稿
         answer_nodes={"assistant", "summary"},
+        callbacks=[handler] if handler else None,
     )
 
 

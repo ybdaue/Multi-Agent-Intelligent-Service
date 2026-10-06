@@ -456,50 +456,6 @@ async def dashboard_distribution(
     ]
 
 
-# ── 模型消费排行 ──
-
-
-@router.get("/model-ranking")
-async def dashboard_model_ranking(
-    request: Request,
-    range: str = Query("total", pattern="^(total|year|month)$"),
-    year: int | None = Query(None, ge=2020, le=2100),
-    month: int | None = Query(None, ge=1, le=12),
-):
-    """各模型消费排行（总费用降序）。"""
-    await _is_admin(request)
-    start, end = _resolve_date_range(range, year, month)
-    wh, params = _where_clause(start, end, alias="")
-
-    async with pg_pool.connection() as conn:
-        cur = await conn.execute(
-            f"""SELECT "modelName", "serviceType",
-                       COUNT(*) AS callCount,
-                       COALESCE(SUM("totalCost"), 0) AS totalCost,
-                       COALESCE(SUM("inputTokens"), 0) AS inputTokens,
-                       COALESCE(SUM("outputTokens"), 0) AS outputTokens
-                FROM "BillingRecord"
-                {wh}
-                GROUP BY "modelName", "serviceType"
-                ORDER BY totalCost DESC
-                LIMIT 20""",
-            params,
-        )
-        rows = await cur.fetchall()
-
-    return [
-        {
-            "modelName": row[0],
-            "serviceType": row[1],
-            "callCount": row[2],
-            "totalCost": row[3],
-            "inputTokens": row[4],
-            "outputTokens": row[5],
-        }
-        for row in rows
-    ]
-
-
 # ── 用户消费 TOP10 ──
 
 

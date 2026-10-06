@@ -34,7 +34,7 @@ function newNovelId() {
   return `novel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const SEED_HINT = "帮我开一本书，你来问我。";
+const OPENING = "我要开一本书";
 
 let seq = 0;
 function nextId() {
@@ -45,9 +45,9 @@ function nextId() {
 /**
  * 新建小说：设定一问一答全在这个弹窗里走完。
  *
- * 开场白可以很模糊 —— 开书 agent（后端 agents/novel/setup）照 setupSkill 逐项给选项、
- * 用户说"你定"就替他拟一版过目。六项齐了请用户过目，认可了才落库，回 onCreated 让工作区
- * 切过去（这一轮不写第一章）。
+ * 弹窗一打开就直接调 run 接口，不再显示静态开场白 —— 开书 agent（后端 agents/novel/setup）
+ * 会先给一个友好的提问开场。逐项给选项、用户说"你定"就替他拟一版过目。
+ * 六项齐了请用户过目，认可了才落库，回 onCreated 让工作区切过去。
  *
  * 打字机是后端真流：散文逐字从 SSE 下来，标记块在服务端就被截掉了（api/novel/stream.py
  * 的 SettingFilter），所以这里只管把 token 接在气泡后面。问题到了就整段替换 —— 两者字节一致，
@@ -122,27 +122,30 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
     },
   };
 
-  const submit = () => {
-    if (busy || failed) return;
-    const text = input.trim();
+  const autoStarted = useRef(false);
 
-    if (!started) {
-      push("user", text || SEED_HINT);
-      setInput("");
-      setStarted(true);
-      setStage("正在想怎么问…");
-      run(novelId, text || SEED_HINT, "", handlers);
-      return;
-    }
-    if (!waiting || !text) return;
+  // 弹窗打开即默认调 run 接口，不显示用户气泡
+  useEffect(() => {
+    if (autoStarted.current) return;
+    autoStarted.current = true;
+    setStarted(true);
+    setStage("正在想怎么问…");
+    run(novelId, OPENING, "", handlers);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const submit = useCallback(() => {
+    if (busy || failed || !waiting) return;
+    const text = input.trim();
+    if (!text) return;
     push("user", text);
     setInput("");
     setWaiting(false);
     setStage("正在想怎么接着问…");
     resume(novelId, text, "", handlers);
-  };
+  }, [busy, failed, waiting, input, push, resume, novelId, handlers]);
 
-  const canSend = !busy && !failed && (started ? waiting && input.trim().length > 0 : true);
+  const canSend = !busy && !failed && waiting && input.trim().length > 0;
 
   return (
     <div className={styles.backdrop}>
@@ -162,16 +165,6 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
         </div>
 
         <div ref={scrollRef} className={styles.body}>
-          <div className={`${styles.row} ${styles.bot}`}>
-            <div className={styles.avatar}>
-              <RobotOutlined />
-            </div>
-            <div className={styles.bubble}>
-              想开一本什么样的书？随便说，模糊也行 —— 书名、题材、主角、核心冲突这些，
-              我会照着畅销书的套路一项一项问你，你拿不准就说「你定」。
-            </div>
-          </div>
-
           {lines.map((line) => (
             <div
               key={line.id}
@@ -206,9 +199,7 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
             placeholder={
               failed
                 ? "本次创建已中止，关掉重来"
-                : started
-                  ? "答这一项：说你的想法，或者直接说「你定」"
-                  : "例如：都市修仙，主角靠金手指一路打脸（也可以留空，我来问）"
+                : "答这一项：说你的想法，或者直接说「你定」"
             }
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -221,10 +212,10 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
           <button
             type="button"
             className={styles.sendBtn}
-            onClick={submit}
+            onClick={() => submit()}
             disabled={!canSend}
-            title={started ? "发送" : "开始"}
-            aria-label={started ? "发送" : "开始"}
+            title="发送"
+            aria-label="发送"
           >
             {busy ? <LoadingOutlined /> : <SendOutlined />}
           </button>

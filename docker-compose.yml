@@ -32,17 +32,16 @@ services:
   agents-api:
     build:
       context: ./agents-project
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
     ports:
       - "8080:8080"
-    volumes:
-      - ./agents-project:/app
-      - ./agents-project/models:/app/models
     environment:
-      - APP_ENV=development
+      - APP_ENV=production
       - postgreSQL_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/demo
       - redis_URL=redis://redis:6379/0
       - CHROMA_SERVER_HOST=chroma
+      - EMBED_MODE=api
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
@@ -54,29 +53,27 @@ services:
   nextjs:
     build:
       context: ./my-app
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_BETTER_AUTH_URL=http://${SERVER_IP:-localhost}:3000
+        - NEXT_PUBLIC_API_URL=http://agents-api:8080
     ports:
       - "3000:3000"
-    volumes:
-      - ./my-app:/app
-      - nextjs_node_modules:/app/node_modules
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/demo
+      - NEXT_PUBLIC_BETTER_AUTH_URL=http://${SERVER_IP:-localhost}:3000
       - NEXT_PUBLIC_API_URL=http://agents-api:8080
-      - NEXT_PUBLIC_BETTER_AUTH_URL=http://26.41.157.27:3000
-      - WATCHPACK_POLLING=true
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
-      - NEXT_DIST_DIR=.next-docker
+      - TICKFLOW_KEY=${TICKFLOW_KEY}
+      - NODE_ENV=production
     depends_on:
       - postgres
       - agents-api
 
 volumes:
   pgdata:
-    external: true
-    name: b98071ecf5e734b76311d81113dea4c992267c2ec69d24cdd36581704d7a0edc
+    name: pgdata
   chromadata:
-    external: true
-    name: nextjs_chromadata
-  nextjs_node_modules:
+    name: chromadata
   redisdata:
+    name: redisdata

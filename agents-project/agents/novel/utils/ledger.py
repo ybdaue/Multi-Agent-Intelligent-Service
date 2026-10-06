@@ -185,23 +185,23 @@ async def fetch_names(novel_id: str) -> list[tuple[str, str, str]]:
     from api.utils.db import pg_pool
 
     sql = (
-        "SELECT 'character', id, name FROM novel_character "
-        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300'
+        "(SELECT 'character', id, name FROM novel_character "
+        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300)'
         " UNION ALL "
-        "SELECT 'faction', id, name FROM novel_faction "
-        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300'
+        "(SELECT 'faction', id, name FROM novel_faction "
+        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300)'
         " UNION ALL "
-        "SELECT 'item', id, name FROM novel_item "
-        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300'
+        "(SELECT 'item', id, name FROM novel_item "
+        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300)'
         " UNION ALL "
-        "SELECT 'world_rule', id, name FROM novel_world_rule "
-        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300'
+        "(SELECT 'world_rule', id, name FROM novel_world_rule "
+        'WHERE "novelId" = %s AND name IS NOT NULL AND name != \'\' ORDER BY "createdAt" LIMIT 300)'
         " UNION ALL "
-        "SELECT 'timeline', id, title FROM novel_timeline "
-        'WHERE "novelId" = %s AND title IS NOT NULL AND title != \'\' ORDER BY "createdAt" LIMIT 300'
+        "(SELECT 'timeline', id, title FROM novel_timeline "
+        'WHERE "novelId" = %s AND title IS NOT NULL AND title != \'\' ORDER BY "createdAt" LIMIT 300)'
         " UNION ALL "
-        "SELECT 'chronicle', id, title FROM novel_chronicle "
-        'WHERE "novelId" = %s AND title IS NOT NULL AND title != \'\' ORDER BY "createdAt" LIMIT 300'
+        "(SELECT 'chronicle', id, title FROM novel_chronicle "
+        'WHERE "novelId" = %s AND title IS NOT NULL AND title != \'\' ORDER BY "createdAt" LIMIT 300)'
     )
     async with pg_pool.connection() as conn:
         cur = await conn.execute(sql, (novel_id,) * 6)
