@@ -46,6 +46,7 @@ from agents.novel.utils.run_state import (
 )
 
 from .stream import ProseFilter
+from ..utils.sse import HEARTBEAT, with_heartbeat
 
 router = APIRouter(prefix="/api/novel/agent", tags=["小说智能体"])
 
@@ -436,12 +437,19 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input, callbacks
             # 定下来再盖（见下面 target 那一处），write_next 的目标章还没落库、id 为空，正是
             # "这一章谁都还没在写"该有的样子。
             await mark_running(user_id, novel_id, "")
-            async for ns, mode, data in novel_agent.astream(
+            events = novel_agent.astream(
                 graph_input,
                 config,
                 stream_mode=["messages", "tasks", "updates"],
                 subgraphs=True,
-            ):
+            )
+            async for item in with_heartbeat(events):
+                if item is None:
+                    # 图闷住了（intension / load 这类不流式的节点可能在跑），发一行注释把
+                    # 连接的"空闲"消掉，免得中间代理按读超时把流掐了。
+                    yield HEARTBEAT
+                    continue
+                ns, mode, data = item
                 if mode == "messages":
                     chunk, metadata = data
                     if not isinstance(chunk, AIMessageChunk):

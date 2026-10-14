@@ -62,6 +62,9 @@ export async function forwardNovelStream(
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
+      // 后端响应里本就有这个头，但真正的响应是这一份（浏览器直接连的是 Next 这层）——
+      // 不带上，nginx 会把 SSE 缓冲住，前端连"正在逐字写"都看不到。
+      "X-Accel-Buffering": "no",
     },
   });
 }

@@ -23,6 +23,8 @@ from langgraph.types import Command
 
 from agents.novel.setup import novel_setup_agent
 
+from ..utils.sse import HEARTBEAT, with_heartbeat
+
 router = APIRouter(prefix="/api/novel/setup", tags=["小说开书"])
 
 logger = logging.getLogger(__name__)
@@ -111,10 +113,17 @@ def _sse(*, user_id: str, novel_id: str, graph_input, callbacks: Optional[list] 
         saved = False
         edit_note = ""
         try:
-            async for namespace, mode, data in novel_setup_agent.astream(
+            events = novel_setup_agent.astream(
                 graph_input, _config(user_id, novel_id, callbacks), stream_mode=["messages", "updates"],
                 subgraphs=True,
-            ):
+            )
+            async for item in with_heartbeat(events):
+                if item is None:
+                    # 图闷住了（maintain 这类不流式的节点可能在跑），发一行注释把连接
+                    # 的"空闲"消掉，免得中间代理按读超时把流掐了。
+                    yield HEARTBEAT
+                    continue
+                namespace, mode, data = item
                 if mode == "messages":
                     if replayed:
                         continue

@@ -56,8 +56,8 @@ function nextId() {
  * 看不出跳变。
  *
  * 关掉 = 本次创建作废，所以**只能按按钮关**（右上角 ×、页脚「放弃 / 取消」）—— 点空白处、
- * 按 Esc 一律不响应，收设定期间按钮本身也禁用：一次误触就把这半本还没落库的书判成失败，
- * 用户会对着"没建成"的结论去找一本其实存在的书。
+ * 按 Esc 一律不响应，免得误触把半本还没落库的书判成失败。收设定期间也能关：按下去先把在飞的
+ * 那轮请求 abort 掉，再关窗；半途而废就跟没建过一样，重开一次即可。
  */
 export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps) {
   const [novelId] = useState(newNovelId);
@@ -71,7 +71,7 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
   const [failed, setFailed] = useState(false);
   /** 设定面板刷新计数器：每次 SSE question/final +1，传给面板组件触发重拉 */
   const [settingsRevision, setSettingsRevision] = useState(0);
-  const { run, resume, busy } = useNovelAgent("setup");
+  const { run, resume, stop, busy } = useNovelAgent("setup");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const push = useCallback((role: Line["role"], content: string) => {
@@ -178,6 +178,12 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
 
   const canSend = !busy && !failed && waiting && input.trim().length > 0;
 
+  /** 中途退出：先把在飞的这轮请求 aborted 掉，再关窗（关掉 = 本次创建作废，书没落库）。 */
+  const abandon = useCallback(() => {
+    stop();
+    onClose();
+  }, [stop, onClose]);
+
   return (
     <div className={styles.backdrop}>
       <div className={`${styles.dialog} ${styles.withPanel}`} role="dialog" aria-modal="true" aria-label="新建小说">
@@ -186,9 +192,8 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
           <button
             type="button"
             className={styles.closeBtn}
-            onClick={onClose}
-            disabled={busy}
-            title={busy ? "设定还没收完，先答完再关" : "关闭"}
+            onClick={abandon}
+            title={busy ? "中断本次设定，关掉弹窗" : "关闭"}
             aria-label="关闭"
           >
             <CloseOutlined />
@@ -268,7 +273,7 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
         <div className={styles.footer}>
           <span className={styles.hint}>
             {busy
-              ? "正在收集设定，答完这一项才能关…"
+              ? "正在收集设定，中途放弃可就白搭了"
               : failed
                 ? "没有建成，关掉重来一次即可"
                 : "设定收齐并确认后，这本书就建好了"}
@@ -276,8 +281,7 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
           <button
             type="button"
             className={styles.cancelBtn}
-            onClick={onClose}
-            disabled={busy}
+            onClick={abandon}
           >
             {started ? "放弃" : "取消"}
           </button>
