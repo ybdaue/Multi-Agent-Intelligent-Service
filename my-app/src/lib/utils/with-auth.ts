@@ -48,7 +48,9 @@ export function withAuth(
         response.headers.append(
           "Set-Cookie",
           `${name}=${val}; Max-Age=${60 * 60 * 2}; Path=/; HttpOnly; SameSite=Lax${
-            req.nextUrl.protocol === "https:" ? "; Secure" : ""
+            name.startsWith("__Host-") || name.startsWith("__Secure-") || req.nextUrl.protocol === "https:"
+              ? "; Secure"
+              : ""
           }`,
         )
         break

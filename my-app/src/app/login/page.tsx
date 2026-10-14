@@ -68,18 +68,17 @@ export default function Login() {
   }
 
   useEffect(() => {
+    // 被踢/封禁/过期的用户带了 reason 参数时，不能再自动跳 /home，
+    // 否则会与 proxy 的保护页重定向形成 /home ↔ /login 死循环
+    const reason = new URLSearchParams(window.location.search).get("reason")
+    if (reason) {
+      setReasonOverlay(decodeURIComponent(reason))
+      return
+    }
     getSession().then(({ data }) => {
       if (data?.session) redirectAfterLogin();
     }).catch(() => {});
   }, []);
-
-  // 从 URL 读取 reason 参数（被踢/封禁/过期），弹遮罩提示
-  useEffect(() => {
-    const reason = new URLSearchParams(window.location.search).get("reason")
-    if (reason) {
-      setReasonOverlay(decodeURIComponent(reason))
-    }
-  }, [])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

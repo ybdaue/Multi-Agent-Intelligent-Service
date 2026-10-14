@@ -67,8 +67,10 @@ services:
       - TICKFLOW_KEY=${TICKFLOW_KEY}
       - NODE_ENV=production
     depends_on:
-      - postgres
-      - agents-api
+      postgres:
+        condition: service_healthy
+      agents-api:
+        condition: service_started
 
 volumes:
   pgdata:
