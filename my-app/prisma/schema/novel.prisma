@@ -40,6 +40,7 @@ enum ImpactReason {
   order_shift //章节增删或重排，正文里写的「第 X 章」这类文字指代对不上了（表里的章节引用已按 id 存，不受重排影响）
   plot_conflict //情节逻辑与改动后的设定不兼容
   outline_conflict //大纲/时间线/编年史的描述与改动后的内容不符
+  review_issue //章节审查（reader）查出的硬伤：风格跑偏、剧情漂移、设定写崩等
   redundant //改动使这一段/这一条变成冗余
 }
 
@@ -65,6 +66,7 @@ model novel {
   wordCount Int      @default(0) //字数
   tropes    String? //小说套路
   style     String? //小说风格
+  reviewEnabled Boolean @default(true) // 是否开启 AI 审稿（reader 节点）；关掉后写/改完直接到确认
   banned    Boolean  @default(false)   // 是否封禁
   banReason String?                     // 封禁原因
   bannedAt  DateTime? @db.Timestamptz(3) // 封禁时间
@@ -129,7 +131,12 @@ model novel_chapter_state {
 model novel_outline {
   id             String   @id @default(cuid())
   novelId        String
+  level          String   @default("main") //分级：主线 main / 阶段线 phase / 支线 branch
   status         String //大纲状态
+  // 包含关系：主线 ⊃ 阶段线 ⊃ 支线。阶段线挂主线、支线挂阶段线；主线自身 parentId 为空。
+  // SetNull 而非 Cascade：重写某一章会撤掉「从这一章起头」的 phase/branch，级联删除会把后面
+  // 章节挂在其名下的支线也一并带走 —— 那是后面的工作，不该被这一章的重写牵连。
+  parentId       String?
   startChapterId String? //适用起始章节（novel_chapter.id）
   endChapterId   String? //适用结束章节（novel_chapter.id）
   order          Int      @default(0) //排序
@@ -137,10 +144,13 @@ model novel_outline {
   createdAt      DateTime @default(now()) @db.Timestamptz
   updatedAt      DateTime @updatedAt @db.Timestamptz
 
-  novel novel               @relation(references: [id], fields: [novelId], onDelete: Cascade)
-  refs  novel_outline_ref[]
+  parent   novel_outline?      @relation("OutlineTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children novel_outline[]     @relation("OutlineTree")
+  novel    novel               @relation(references: [id], fields: [novelId], onDelete: Cascade)
+  refs     novel_outline_ref[]
 
   @@index([novelId, order])
+  @@index([novelId, parentId])
 }
 
 model novel_character {
@@ -281,9 +291,16 @@ model novel_relation {
 model novel_inspiration {
   id             String   @id @default(cuid())
   novelId        String
-  type           String //灵感类型
-  content        String //灵感内容
-  usedChapterIds String[] //已使用章节（novel_chapter.id 列表）
+  sourceId       String   @default("") //同一份素材（一次新增）产出的多条灵感共享此 id；空串是老数据，各自成组
+  title          String   @default("") //显示名（模型翻译出的短名，兜底用文件原名 / 文本首行 / URL）
+  category       String[] @default(["other"]) //内容类型（可多选，尽量少选）：style/plot/character/meme/setting/scene/dialogue/imagery/emotion/technique/other
+  type           String //素材形态：text/file/url（老数据可能是 image，只读兼容）
+  content        String //灵感原文
+  usage          String   @default("selectable") //使用策略：must 必用 / selectable 选用 / never 不用
+  lifecycle      String   @default("reuse") //生命周期：reuse 复用 / once 单次（用过后退出候选）
+  scenario       String   @default("") //可使用场景（模型翻译产出）
+  digest         String   @default("") //写作指引（模型翻译产出，写手照它落笔）
+  usedChapterIds String[] //已使用章节（novel_chapter.id 列表），由 update 落章后自动补
   createdAt      DateTime @default(now()) @db.Timestamptz
   updatedAt      DateTime @updatedAt @db.Timestamptz
 

@@ -10,6 +10,8 @@ import {
 } from "@ant-design/icons";
 import type { NovelAgentHandlers } from "../useNovelAgent";
 import { useNovelAgent } from "../useNovelAgent";
+import SetupSettingsPanel from "./SetupSettingsPanel";
+import { FIELD_LABELS } from "./types";
 import styles from "./index.module.scss";
 
 interface NewNovelModalProps {
@@ -67,6 +69,8 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
   const [waiting, setWaiting] = useState(false);
   /** 这一轮炸了：只能关掉重来，别再往同一个 thread 上叠 */
   const [failed, setFailed] = useState(false);
+  /** 设定面板刷新计数器：每次 SSE question/final +1，传给面板组件触发重拉 */
+  const [settingsRevision, setSettingsRevision] = useState(0);
   const { run, resume, busy } = useNovelAgent("setup");
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -102,10 +106,12 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
       });
       setWaiting(true);
       setStage("");
+      setSettingsRevision((n) => n + 1);
     },
     onFinal: (data) => {
       setWaiting(false);
       setStage("");
+      setSettingsRevision((n) => n + 1);
       if (data.saved) {
         onCreated(data.novelId || novelId);
         return;
@@ -145,11 +151,36 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
     resume(novelId, text, "", handlers);
   }, [busy, failed, waiting, input, push, resume, novelId, handlers]);
 
+  /** 用户通过右侧面板编辑了一项设定：构造系统消息发给 agent */
+  const handleEdit = useCallback(
+    (field: string, content: string) => {
+      if (busy || failed || !waiting) return;
+      // 格式与后端 settings.py 的 SETTING_MARK / SETTING_END 一致，maintain 节点能解析
+      const editText = `用户修改了设定项「${field}」为：\n【设定项】${field}\n【内容】${content}\n【设定结束】`;
+      const label = FIELD_LABELS[field] || field;
+      // 结构化项的内容是 JSON，气泡里别摆原文，能解就摊成"值、值"
+      let preview = content;
+      try {
+        const obj = JSON.parse(content);
+        if (obj && typeof obj === "object") {
+          preview = Object.values(obj).filter(Boolean).join("、");
+        }
+      } catch {
+        // 非 JSON（书名/核心冲突等散文项），原样显示
+      }
+      push("user", `✏️ 修改了「${label}」：\n${preview}`);
+      setWaiting(false);
+      setStage("正在处理修改…");
+      resume(novelId, editText, "", handlers);
+    },
+    [busy, failed, waiting, push, resume, novelId, handlers],
+  );
+
   const canSend = !busy && !failed && waiting && input.trim().length > 0;
 
   return (
     <div className={styles.backdrop}>
-      <div className={styles.dialog} role="dialog" aria-modal="true" aria-label="新建小说">
+      <div className={`${styles.dialog} ${styles.withPanel}`} role="dialog" aria-modal="true" aria-label="新建小说">
         <div className={styles.header}>
           <span className={styles.title}>新建小说</span>
           <button
@@ -164,61 +195,74 @@ export default function NewNovelModal({ onClose, onCreated }: NewNovelModalProps
           </button>
         </div>
 
-        <div ref={scrollRef} className={styles.body}>
-          {lines.map((line) => (
-            <div
-              key={line.id}
-              className={`${styles.row} ${line.role === "user" ? styles.mine : styles.bot}`}
-            >
-              <div className={styles.avatar}>
-                {line.role === "user" ? <UserOutlined /> : <RobotOutlined />}
-              </div>
-              <div className={styles.bubble}>{line.content}</div>
-            </div>
-          ))}
+        <div className={styles.mainArea}>
+          {/* 左侧：聊天区 + 输入框 */}
+          <div className={styles.chatColumn}>
+            <div ref={scrollRef} className={styles.body}>
+              {lines.map((line) => (
+                <div
+                  key={line.id}
+                  className={`${styles.row} ${line.role === "user" ? styles.mine : styles.bot}`}
+                >
+                  <div className={styles.avatar}>
+                    {line.role === "user" ? <UserOutlined /> : <RobotOutlined />}
+                  </div>
+                  <div className={styles.bubble}>{line.content}</div>
+                </div>
+              ))}
 
-          {stage && (
-            <div className={`${styles.row} ${styles.bot}`}>
-              <div className={styles.avatar}>
-                <RobotOutlined />
-              </div>
-              <div className={`${styles.bubble} ${styles.stageBubble}`}>
-                <LoadingOutlined className={styles.stageIcon} />
-                {stage}
-              </div>
+              {stage && (
+                <div className={`${styles.row} ${styles.bot}`}>
+                  <div className={styles.avatar}>
+                    <RobotOutlined />
+                  </div>
+                  <div className={`${styles.bubble} ${styles.stageBubble}`}>
+                    <LoadingOutlined className={styles.stageIcon} />
+                    {stage}
+                  </div>
+                </div>
+              )}
             </div>
-          )}
-        </div>
 
-        <div className={styles.composer}>
-          <textarea
-            className={styles.textarea}
-            value={input}
-            rows={2}
-            disabled={busy || failed}
-            placeholder={
-              failed
-                ? "本次创建已中止，关掉重来"
-                : "答这一项：说你的想法，或者直接说「你定」"
-            }
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                submit();
-              }
-            }}
+            <div className={styles.composer}>
+              <textarea
+                className={styles.textarea}
+                value={input}
+                rows={2}
+                disabled={busy || failed}
+                placeholder={
+                  failed
+                    ? "本次创建已中止，关掉重来"
+                    : "答这一项：说你的想法，或者直接说「你定」"
+                }
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    submit();
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className={styles.sendBtn}
+                onClick={() => submit()}
+                disabled={!canSend}
+                title="发送"
+                aria-label="发送"
+              >
+                {busy ? <LoadingOutlined /> : <SendOutlined />}
+              </button>
+            </div>
+          </div>
+
+          {/* 右侧：设定面板 */}
+          <SetupSettingsPanel
+            novelId={novelId}
+            revision={settingsRevision}
+            canEdit={waiting && !busy && !failed}
+            onEdit={handleEdit}
           />
-          <button
-            type="button"
-            className={styles.sendBtn}
-            onClick={() => submit()}
-            disabled={!canSend}
-            title="发送"
-            aria-label="发送"
-          >
-            {busy ? <LoadingOutlined /> : <SendOutlined />}
-          </button>
         </div>
 
         <div className={styles.footer}>

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  AlignLeftOutlined,
   BorderOutlined,
   BulbOutlined,
   ClearOutlined,
@@ -14,7 +15,8 @@ import {
   SendOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import InspirationModal from "../InspirationModal";
+import { Switch } from "antd";
+import InspirationPicker from "../InspirationPicker";
 import type { InspirationItem, Message } from "../types";
 import styles from "./index.module.scss";
 
@@ -29,6 +31,8 @@ const TOOL_PROMPTS = [
 interface AiPanelProps {
   messages: Message[];
   onSend: (text: string, attachments: InspirationItem[]) => void;
+  /** 这本书的 id（= threadId）：从灵感库挑灵感时要它去拉这本书的灵感列表 */
+  threadId: string | null;
   /** 当前进度文案（"正在写这一章…"），空串表示没有在跑的活 */
   stage: string;
   /** 整个面板封掉：本轮还没跑完（别在同一 thread 上叠第二轮），或本轮在别的章上跑 */
@@ -45,17 +49,22 @@ interface AiPanelProps {
   onAnswer: (option: { id: string; label: string }) => void;
   /** 清空这本书的对话记录（后端那份一起清，刷新后不会回来） */
   onClear: () => void;
+  /** 这本书的 AI 审稿开关；切换即写入 novel.reviewEnabled */
+  reviewEnabled: boolean;
+  onToggleReview: (on: boolean) => void;
 }
 
 function AttachmentIcon({ kind }: { kind: InspirationItem["kind"] }) {
   if (kind === "image") return <PictureOutlined />;
   if (kind === "file") return <FileTextOutlined />;
+  if (kind === "text") return <AlignLeftOutlined />;
   return <LinkOutlined />;
 }
 
 export default function AiPanel({
   messages,
   onSend,
+  threadId,
   stage,
   disabled,
   running,
@@ -64,6 +73,8 @@ export default function AiPanel({
   answerOptions,
   onAnswer,
   onClear,
+  reviewEnabled,
+  onToggleReview,
 }: AiPanelProps) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<InspirationItem[]>([]);
@@ -104,7 +115,7 @@ export default function AiPanel({
         <button
           type="button"
           className={styles.toolBtn}
-          title="上传图片、文件或链接作为灵感素材"
+          title="从灵感库挑选用在本章的灵感（挑中的这一章必须用）"
           disabled={disabled}
           onClick={() => setModalOpen(true)}
         >
@@ -205,6 +216,14 @@ export default function AiPanel({
         )}
       </div>
 
+      {/* AI 审稿开关：输入框上方单独一行，靠左 */}
+      <div className={styles.reviewBar}>
+        <span className={styles.reviewLabel} title="关掉后 AI 写完不再审稿，直接进入确认">
+          AI 审稿
+        </span>
+        <Switch size="small" checked={reviewEnabled} onChange={onToggleReview} />
+      </div>
+
       <div className={styles.composer}>
         {attachments.length > 0 && (
           <div className={styles.staged}>
@@ -295,12 +314,12 @@ export default function AiPanel({
       </div>
 
       {modalOpen && (
-        <InspirationModal
+        <InspirationPicker
+          threadId={threadId}
           onClose={() => setModalOpen(false)}
           onConfirm={(items) => {
             // 只暂存到输入框附件区，由用户补完文字后自行发送
             setAttachments((prev) => [...prev, ...items]);
-            setModalOpen(false);
           }}
         />
       )}

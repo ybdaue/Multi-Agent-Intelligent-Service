@@ -12,8 +12,9 @@ from langchain_core.tools import tool
 
 # 单元格字符上限：章节正文能有几千字，但也不能一条把上下文吃光。
 MAX_CELL = 3_000
-# 整条结果的上限，超了截断。
-MAX_CHARS = 15_000
+# 整条结果的上限，超了截断。压到 1 万字以内：查库结果会滚进后续每一轮 LLM 的输入，
+# 结果越肥每轮重发越慢（写手常一次读好几条设定 / 整章）。
+MAX_CHARS = 10_000
 # 一次最多返回多少行。
 MAX_LIMIT = 100
 
@@ -117,7 +118,8 @@ async def fetchDB(
         keyword 可搜正文，想知道某章写了什么、某个人物在哪一章出现就用它）
       novel_chapter_state 单章收尾时的状态快照（protagonistState 主角状态 / storyTime 故事内时间 /
         eventProgress 事件进度 / worldState 世界局势）
-      novel_inspiration 全书灵感（type / content / usedChapterIds 用在哪些章）
+      novel_inspiration 全书灵感（title 显示名 / category 内容类型数组，可取多个 style/plot/
+        character/meme/setting/other / type 素材形态 text/file/url / content / usedChapterIds 用在哪些章）
       novel_chapter_inspiration 本章灵感（type / content / status）
       novel_chapter_ref 本章关联的人物、势力、时间线、伏笔、物品（refType / refId /
         role 戏份：key 关键 / state 状态 / mention 提及）

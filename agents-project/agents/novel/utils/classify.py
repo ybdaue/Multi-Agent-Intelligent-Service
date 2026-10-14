@@ -42,3 +42,12 @@ def route_after_resolve(state: State) -> str:
     """
     return "edit" if state.get("intension") == "edit" else "write"
 
+
+def route_after_draft(state: State) -> str:
+    """一稿写完 / 改完：审稿开着就去 reader 查一遍，关着就直接停下来问用户。
+
+    开关由 load 按 novel.reviewEnabled 读进 state.review_enabled。关掉的书走 confirm_chapter
+    —— 用户确认后落库，中间不插 reader 那一关（少了「正在审稿…」那道状态行）。
+    """
+    return "reader" if state.get("review_enabled", True) else "confirm_chapter"
+

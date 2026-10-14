@@ -5,6 +5,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import { App as AntApp } from "antd";
 import AppHeader from "./AppHeader";
+import SessionMonitor from "@/components/SessionMonitor";
 import "./tailwind.css";
 import "./globals.scss";
 
@@ -34,6 +35,7 @@ export default function RootLayout({
       <body className={`${geistSans.variable} ${geistMono.variable}`}>
         <ThemeProvider attribute="class" defaultTheme="light" storageKey="theme">
           <AntApp>
+            <SessionMonitor />
             <AppHeader />
             {children}
           </AntApp>

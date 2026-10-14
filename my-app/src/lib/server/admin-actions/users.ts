@@ -146,7 +146,10 @@ export async function banUser(id: string) {
   }
 
   const result = await prisma.user.update({ where: { id }, data: { banned: true } });
-  await prisma.session.deleteMany({ where: { userId: id } });
+  await prisma.session.updateMany({
+    where: { userId: id, revokedReason: null },
+    data: { revokedReason: "账号已被管理员封禁", revokedAt: new Date() },
+  });
   revalidateAdmin("/admin/users");
   logAdminAction({ adminId: admin.userId, adminEmail: admin.email, action: "ban", targetType: "user", targetId: id, detail: `封禁用户 ${target.email || id}` });
   return result;

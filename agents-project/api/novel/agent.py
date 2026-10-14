@@ -27,7 +27,7 @@ import asyncio
 import json
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -35,7 +35,7 @@ from langgraph.types import Command
 
 from agents.novel import novel_agent
 from agents.novel.utils.history import last_reply, visible_messages
-from agents.novel.utils.inspiration import add_inspirations
+from agents.novel.utils.inspiration import fetch_inspirations
 from agents.novel.utils.run_state import (
     AWAITING,
     CANCELLED,
@@ -58,8 +58,10 @@ _SSE_HEADERS = {
     "X-Accel-Buffering": "no",
 }
 
-# 状态行文案：按父图的节点名报，不读任何模型输出 —— reader 的判词 JSON、summarize 的摘要
-# 都不可能从这里漏出去。没列进来的节点（以及子图内部的 model / tools）一律不报。
+# 状态行文案：按图里的节点名报，不读任何模型输出 —— reader 的判词 JSON、summarize 的摘要
+# 都不可能从这里漏出去。没列进来的节点（以及子图内 create_agent 的 model / tools）一律不报。
+# writer / reader / editor 是编译子图，它们内部走到了哪一步靠一套带前缀的键报细一点：
+# 键是 "父图节点.子图节点"（writer.prepare 这类），拼接见 _stage_key。
 # 报的时机在 tasks 流上：任务**开跑**就报（updates 那条流要等节点跑完才来，写一章的过程里
 # 状态行会一直停在"正在读取这本书的设定…"）。
 _STAGE_TEXT = {
@@ -73,7 +75,44 @@ _STAGE_TEXT = {
     "update": "正在落库…",
     "compact": "正在整理对话…",
     "chat": "正在回复…",
+    # writer 子图：prepare → planner → write → collect
+    "writer.prepare": "正在读取小说设定…",
+    "writer.planner": "正在编织剧情…",
+    "writer.write": "正在写这一章…",
+    "writer.collect": "正在整理这一章的正文…",
+    # reader 子图：gather →（logic ∥ pacing ∥ style 三路并行）→ save。
+    # 三路审查并行跑，谁最后开谁的话术就盖住另外两个 —— 报不出"正在审哪一路"，
+    # 索性三路共用一个"正在审稿…"，免得卡在"正在审文风…"上而其实是 pacing 在熬。
+    "reader.gather": "正在准备审稿材料…",
+    "reader.logic": "正在审稿…",
+    "reader.pacing": "正在审稿…",
+    "reader.style": "正在审稿…",
+    "reader.save": "正在汇总审稿意见…",
+    # editor 子图：prepare → plan → settle → impact → approve → revise → collect
+    "editor.prepare": "正在准备要改的地方…",
+    "editor.plan": "正在理解你要改什么…",
+    "editor.settle": "正在定夺怎么改…",
+    "editor.impact": "正在估算改动范围…",
+    "editor.approve": "等你看这一处…",
+    "editor.revise": "正在改这一章…",
+    "editor.collect": "正在整理改动…",
 }
+
+# 挂了子图的父图节点：它们内部已经报过更细的那一步，父图节点跑完时别再拿粗文案盖回去。
+_SUBGRAPH_NODES = frozenset({"writer", "reader", "editor"})
+
+
+def _stage_key(ns, name: str) -> str:
+    """tasks 流里这一条对应哪个文案键。
+
+    父图节点就是节点名（"resolve"）；子图内部的节点拼成 "父图节点.子图节点" —— writer 与
+    editor 里都有 prepare / collect，只按名字取会张冠李戴，所以带上第一段命名空间（形如
+    "writer:<uuid>"）的父图节点名。
+    """
+    if not ns:
+        return name
+    owner = str(ns[0]).split(":")[0]
+    return f"{owner}.{name}"
 
 
 def _event(name: str, payload: dict) -> str:
@@ -162,62 +201,6 @@ def _draft(result: dict) -> dict:
         "title": chapter.get("chapter_title") or "",
         "content": content,
     }
-
-
-# 文本类附件的扩展名兜底：content_type 未必准（txt 传成 octet-stream 很常见）。
-_TEXT_EXT = (".md", ".txt", ".json", ".csv", ".html", ".htm", ".log", ".yml", ".yaml")
-# 单个附件读取上限：再大就不是"给模型看的素材"了。
-MAX_UPLOAD_BYTES = 2 * 1024 * 1024
-# 一条附件进提示词的字符上限。
-MAX_ATTACH_CHARS = 4_000
-
-
-async def _attachment(file: UploadFile) -> str:
-    """一个上传转成给模型看的文字；图片与二进制只说"有这么个文件，看不了内容"。
-
-    模型是纯文本的，没有 vision —— 图片硬塞字节没有意义，如实告诉它读不了，免得它以为看过。
-    """
-    name = (file.filename or "").strip()
-    content_type = (file.content_type or "").lower()
-    if not (content_type.startswith("text/") or name.lower().endswith(_TEXT_EXT)):
-        kind = "图片" if content_type.startswith("image/") else f"{content_type or '未知类型'} 文件"
-        return f"（{kind}，看不了内容）"
-
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        return "（文件过大，未读取）"
-    text = data.decode("utf-8", errors="replace")
-    return text[:MAX_ATTACH_CHARS] + ("…（已截断）" if len(text) > MAX_ATTACH_CHARS else "")
-
-
-async def _inspirations(meta: str, files: list[UploadFile]) -> list[dict]:
-    """这一轮挂上来的素材：前端的元信息 + 上传件的内容（能读的才读）。
-
-    meta 是 JSON 数组，字段与前端 InspirationItem 对齐（kind / name / url / hasFile）。带
-    hasFile 的那几条与 files **同序**（前端两个数组一起拼的），按顺序配回去；链接类没有上传件。
-    """
-    try:
-        parsed = json.loads(meta or "[]")
-    except ValueError:
-        parsed = []
-    if not isinstance(parsed, list):
-        parsed = []
-
-    pending = list(files)
-    items = []
-    for raw in parsed:
-        if not isinstance(raw, dict):
-            continue
-        kind = str(raw.get("kind") or "file")
-        item = {"type": kind, "name": str(raw.get("name") or "").strip() or "未命名"}
-        if kind == "url":
-            item["content"] = str(raw.get("url") or "").strip()
-        elif raw.get("hasFile") and pending:
-            item["content"] = await _attachment(pending.pop(0))
-        else:
-            item["content"] = "（没收到这个文件）"
-        items.append(item)
-    return items
 
 
 def _reply(result: dict) -> str:
@@ -475,10 +458,11 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input, callbacks
                         prose_ns = run
                 elif mode == "tasks":
                     # 状态行在任务**开跑**时报。带 triggers 的是开始事件，带 result 的是结束。
-                    # 子图内部的任务不报（ns 非空，那些是 prepare / write / model），
-                    # 用户认得的步骤只有父图这几个节点。
-                    if not ns and isinstance(data, dict) and "triggers" in data:
-                        if text := _STAGE_TEXT.get(str(data.get("name") or "")):
+                    # 父图节点与 writer / reader / editor 子图内部的节点都报，文案按 _stage_key 取；
+                    # 子图内 create_agent 的 model / tools 不在表里，自然略过。
+                    if isinstance(data, dict) and "triggers" in data:
+                        key = _stage_key(ns, str(data.get("name") or ""))
+                        if text := _STAGE_TEXT.get(key):
                             yield _event("stage", {"text": text})
                 elif mode == "updates":
                     for node, update in (data or {}).items():
@@ -505,8 +489,13 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input, callbacks
                                 )
                                 yield _event("target", target)
                         # 状态行兜底那一道：父图节点跑完再报一次同样的文案（tasks 那条流已经
-                        # 在开跑时报过了，文字一模一样，前端换一遍而已）。子图内部的不报。
-                        if not ns and (text := _STAGE_TEXT.get(node)):
+                        # 在开跑时报过了，文字一模一样，前端换一遍而已）。writer / reader / editor
+                        # 不报 —— 它们内部已经报过更细的那一步，这里再盖回粗文案只会倒退。
+                        if (
+                            not ns
+                            and node not in _SUBGRAPH_NODES
+                            and (text := _STAGE_TEXT.get(node))
+                        ):
                             yield _event("stage", {"text": text})
 
             for name, payload in prose.flush():
@@ -565,8 +554,7 @@ async def call_novel_agent(
     novelId: str = Form(...),
     text: str = Form(...),
     chapterId: Optional[str] = Form(None),
-    inspirations: str = Form("[]"),
-    files: list[UploadFile] = File(default=[]),
+    inspirationIds: str = Form("[]"),
 ):
     """把一句话交给小说图，流式跑这一轮；停在提问上就把问题交给前端。
 
@@ -576,8 +564,9 @@ async def call_novel_agent(
     上一稿还停在确认上就别往下跑：writer 一 save 就用整份 active_chapter 盖掉正文，拦在图里
     已经晚了（拦在 intension 也一样晚）。所以守在这儿，把那个问题原样发回去。
 
-    用户挂上来的素材（inspirations 那份元信息 + files 那些上传件）在过了这道门禁之后落
-    novel_inspiration，再随 state 进图：能读成文字的进 writer / editor 的提示词，图片只存档。
+    用户这一轮挑中的灵感（inspirationIds，灵感库内已有行的 id）在过了这道门禁之后按 id 取回，
+    随 state.inspirations 进图：**只取不落库** —— 灵感在灵感库新增时就入了库，对话这里只是
+    点名要用哪几条。取回的行带真 id，落章后 update 据此补 usedChapterIds。
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="至少说一句要写什么")
@@ -588,7 +577,14 @@ async def call_novel_agent(
     if pending.get("pending"):
         return _sse_pending(novelId, pending)
 
-    written = await add_inspirations(novelId, await _inspirations(inspirations, files))
+    try:
+        ids = json.loads(inspirationIds or "[]")
+    except ValueError:
+        ids = []
+    if not isinstance(ids, list):
+        ids = []
+    selected = await fetch_inspirations(novelId, [str(i) for i in ids if i])
+
     handler = getattr(request.state, "token_collector", None)
     return _sse(
         user_id=user_id,
@@ -597,7 +593,7 @@ async def call_novel_agent(
         graph_input={
             "user_id": user_id,
             "user_message": text,
-            "inspirations": written,
+            "inspirations": selected,
         },
         callbacks=[handler] if handler else None,
     )

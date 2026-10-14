@@ -1,15 +1,19 @@
-"""本章台账：writer 交完稿多报的两样 —— 这一章**用到**了哪些已有设定、**新造**了哪些东西。
+"""本章台账：writer 交完稿多报的三样 —— 这一章**用到**了哪些已有设定、**新造**了哪些东西、
+**处在**哪条阶段线 / 支线上。
 
-在写作这一环顺手报最准也最省（它本来就知道自己用了谁、造了什么），将来改设定才查得出哪些
-章节被波及。用到/提到的 → novel_chapter_ref（章节 ↔ 设定的关联表）；新造的 → 先落它自己的表
-再挂一条 ref，下一章再写它就变成"已有"。reader 反着用它取档案核正文（fetch_ref_facts）。
+在写作这一环顺手报最准也最省（它本来就知道自己用了谁、造了什么、写到了哪个阶段），将来改设定
+才查得出哪些章节被波及。用到/提到的 → novel_chapter_ref（章节 ↔ 设定的关联表）；新造的 → 先落
+它自己的表再挂一条 ref，下一章再写它就变成"已有"；阶段线 / 支线 → novel_outline 的 level=phase /
+branch 那几行（主线由 setup 落，不在台账里）。reader 反着用它取档案核正文（fetch_ref_facts）。
 
 格式：正文在前，末尾「【本章台账】」紧跟一段 JSON：
     {"refs": [{"refType": "character", "refId": "目录里的 id", "role": "key"}],
-     "new": [{"refType": "item", "fields": {"name": "青锋剑", "type": "兵器"}}]}
+     "new": [{"refType": "item", "fields": {"name": "青锋剑", "type": "兵器"}}],
+     "lines": [{"level": "branch", "id": "", "action": "open", "content": "主角误入宗门大比"}]}
 字段一致性三处对齐、不许各自发明：JSON 的键就是 Prisma 列名；refType 必须是 RefType 九个枚举
-之一（枚举列写错会整条 INSERT 回滚，所以 normalize_refs 先筛）；实体字段只认 NEW_ENTITY_SPEC。
-解析不出来就给空表、不报错，为它把一章卡住不值当。
+之一（枚举列写错会整条 INSERT 回滚，所以 normalize_refs 先筛）；实体字段只认 NEW_ENTITY_SPEC；
+lines 只认 phase / branch 两级（见 normalize_lines）。解析不出来就给空表、不报错，为它把一章卡住
+不值当。
 
 写库幂等：实体按"认身份的那一列"查了再插，ref 靠 (chapterId, refType, refId) 唯一 + ON CONFLICT
 只更新 role，重跑不会插出重复。重写一章时关联整批换掉（除非这一稿没给出可用的台账，那就一行
@@ -134,7 +138,7 @@ CATALOG = (
     ("chronicle", "novel_chronicle", '"title"'),
     ("outline", "novel_outline", 'left("content", 40)'),
     ("foreshadowing", "novel_foreshadowing", 'left("description", 40)'),
-    ("inspiration", "novel_inspiration", 'left("content", 40)'),
+    ("inspiration", "novel_inspiration", 'COALESCE(NULLIF("title", \'\'), left("content", 40))'),
 )
 
 # 每类最多给多少条：写熟的书人物会有几百个，全塞进提示词会把真正的材料挤没了。
@@ -159,6 +163,46 @@ REF_INSERT = (
 
 # 重写这一章时整批换：旧的关联先全删，再按这一稿的台账写新的。
 DELETE_REFS = 'DELETE FROM novel_chapter_ref WHERE "chapterId" = %s'
+
+# 台账里 lines 只报这两级：主线（main）由 setup 落好，不由写手新报。
+LINE_LEVELS = ("phase", "branch")
+LINE_ACTIONS = ("open", "continue", "close")
+
+# 新开一条线：startChapterId 钉在这一章，order 用章节序号排（同一章报的多条按报的顺序）。
+# parentId 表达包含关系（阶段线挂主线、支线挂阶段线），没有父给 NULL —— 空串会撞外键。
+# 主线由 setup 落（level=main），这里只插 phase / branch。status 走设定那套 draft。
+LINE_INSERT = (
+    'INSERT INTO novel_outline (id, "novelId", level, status, "order", content, '
+    '"parentId", "startChapterId", "createdAt", "updatedAt") '
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now(), now())"
+)
+
+# 收尾一条线：endChapterId 钉在这一章，之后 get_writer_context 不再把它算作"生效中"。
+# 只认 phase / branch —— 写手若把主线的 id 报进来，别让它把 setup 落的主线收掉。
+LINE_CLOSE = (
+    'UPDATE novel_outline SET "endChapterId" = %s, "updatedAt" = now() '
+    'WHERE id = %s AND "novelId" = %s AND level IN (\'phase\', \'branch\')'
+)
+
+# 阶段线收尾时，把它名下仍开着的支线一并收尾：阶段线都结束了，底下不该还挂着一条"生效中"的
+# 支线让下一章的 planner 判错。只收 parentId 指这条阶段线、且还没收尾的支线。
+LINE_CLOSE_CHILDREN = (
+    'UPDATE novel_outline SET "endChapterId" = %s, "updatedAt" = now() '
+    'WHERE "novelId" = %s AND "parentId" = %s AND level = \'branch\' AND "endChapterId" IS NULL'
+)
+
+# 沿用一条线时顺手把内容刷成最新口径（写手可能把这一段的说法写细了）。同样只认 phase / branch。
+LINE_UPDATE_CONTENT = (
+    'UPDATE novel_outline SET content = %s, "updatedAt" = now() '
+    'WHERE id = %s AND "novelId" = %s AND level IN (\'phase\', \'branch\')'
+)
+
+# 重写这一章时幂等：先把"从这一章起头"的 phase / branch 撤掉，再按新台账重挂。
+# 只删 startChapterId = 这一章的，不动 setup 落的主线（level=main）和别章起的线。
+DELETE_STARTED_LINES = (
+    'DELETE FROM novel_outline WHERE "novelId" = %s AND "startChapterId" = %s '
+    "AND level IN ('phase', 'branch')"
+)
 
 # 审查要摆到台面上的几类：大纲与世界规则已由 get_writer_context 给过，灵感没什么可核的。
 FACT_TYPES = ("character", "faction", "item", "timeline", "chronicle", "foreshadowing")
@@ -254,24 +298,26 @@ def split_submission(reply: str) -> tuple[str, str]:
     return split_ledger(text)
 
 
-def parse_ledger(text: str) -> tuple[list[dict] | None, list[dict]]:
-    """台账文本 → (refs, new)，一律不抛异常（容错交给 parse_json_value）。
+def parse_ledger(text: str) -> tuple[list[dict] | None, list[dict], list[dict]]:
+    """台账文本 → (refs, new, lines)，一律不抛异常（容错交给 parse_json_value）。
 
     refs 可能是 **None**，意思是"这一稿没给出可用的关联清单"（没写、解不出来、没有 refs 键），
     write_ledger 据此别去动旧的关联；给了 `"refs": []` 是明确说不涉及任何已有设定，该换掉。
+    lines 是这一章所处的阶段线 / 支线，没报就是 [] —— 与 refs 的 None 不同，[] 表示这一章
+    不动大纲那一块（别把旧的线删了）。
     """
     if not (text or "").strip():
-        return None, []
+        return None, [], []
     try:
         payload = parse_json_value(text)
     except (ValueError, TypeError):
-        return None, []
+        return None, [], []
     if not isinstance(payload, dict):
-        return None, []
+        return None, [], []
 
     raw_refs = payload.get("refs")
     refs = normalize_refs(raw_refs) if isinstance(raw_refs, list) else None
-    return refs, normalize_new(payload.get("new"))
+    return refs, normalize_new(payload.get("new")), normalize_lines(payload.get("lines"))
 
 
 def _text(value: Any) -> str:
@@ -343,6 +389,33 @@ def normalize_new(raw: Any) -> list[dict]:
     return entries
 
 
+def normalize_lines(raw: Any) -> list[dict]:
+    """lines 洗一遍：只认 phase / branch、action 只认 open / continue / close，其余整条丢掉。
+
+    - open：新开一条，必须有内容（没有内容就是一条空线，认不出是什么）；id 一律清零。
+    - continue：沿用在写的那一条，必须有 id（没有就指不到目标），可带新版内容。
+    - close：收尾已有的一条，必须有 id，content 不用给。
+    """
+    lines: list[dict] = []
+    for item in _items(raw):
+        if not isinstance(item, dict):
+            continue
+        level = str(item.get("level") or "").strip()
+        action = str(item.get("action") or "").strip()
+        if level not in LINE_LEVELS or action not in LINE_ACTIONS:
+            continue
+        line_id = str(item.get("id") or "").strip()
+        content = _text(item.get("content"))
+        if action == "open":
+            if not content:
+                continue
+            line_id = ""
+        elif not line_id:
+            continue
+        lines.append({"level": level, "action": action, "id": line_id, "content": content})
+    return lines
+
+
 def render_catalog(rows) -> str:
     """目录查询的结果行 → 给 writer 看的几行，按类型分块。没查到的类型不出现。"""
     grouped: dict[str, list[str]] = {}
@@ -369,6 +442,30 @@ async def fetch_catalog(novel_id: str) -> str:
     async with pg_pool.connection() as conn:
         cur = await conn.execute(CATALOG_SQL, (novel_id,) * len(CATALOG))
         return render_catalog(await cur.fetchall())
+
+
+# 取"序号严格小于 order 的最近一章"的台账 refs：给 writer.prepare / reader.gather 用 ——
+# 动笔与审稿都还没有本章的台账，能拿的只有上一章那份（它用到哪些设定，就是新一轮要接住的）。
+# 中间删过章会有空洞，所以取 max(order) < 目标的那一章，不写死 order-1。
+PREV_REFS_SQL = (
+    'SELECT r."refType", r."refId", r.role FROM novel_chapter_ref r '
+    'JOIN novel_chapter c ON c.id = r."chapterId" '
+    'WHERE c."novelId" = %s AND c."order" = ('
+    'SELECT MAX("order") FROM novel_chapter WHERE "novelId" = %s AND "order" < %s)'
+)
+
+
+async def fetch_chapter_refs(novel_id: str, order: int) -> list[dict]:
+    """取目标章前面最近那一章的台账 refs（[{refType, refId, role}]），没有就给空表。
+
+    上一章没有、或它没报过台账时返回 []，调用方喂给 fetch_ref_facts 自然得到空档案。
+    """
+    from api.utils.db import pg_pool
+
+    async with pg_pool.connection() as conn:
+        cur = await conn.execute(PREV_REFS_SQL, (novel_id, novel_id, order))
+        rows = await cur.fetchall()
+    return [{"refType": ref_type, "refId": ref_id, "role": role} for ref_type, ref_id, role in rows]
 
 
 def _quote(columns) -> str:
@@ -465,6 +562,43 @@ async def write_ledger(conn, novel_id: str, chapter_id: str, refs, new_entries) 
         )
         written += 1
     return written
+
+
+async def write_lines(conn, novel_id: str, chapter_id: str, chapter_order: int, lines) -> None:
+    """把这一章报的阶段线 / 支线写进 novel_outline，跑在章节写入的同一事务里。
+
+    先撤掉"从这一章起头"的 phase / branch（重写这一章时旧的开线不该留着），再按台账重挂：
+      open     → 新插一行，startChapterId = 这一章；id 用行里预生成的（好让同一章新开的支线
+                 能挂到同一章新开的阶段线下），parentId 挂父（阶段线→主线、支线→阶段线）；
+      close    → 把目标行的 endChapterId 钉在这一章；收的是阶段线时，把它名下仍开着的支线一并收尾；
+      continue → 沿用；带内容就顺带刷新那一行。
+    lines 为空（没报）就一行不动 —— 与 refs 的 None 同思路，这一稿没说的事别去改它。
+    chapter_id 必须是已落库的章节 id（新开线的 startChapterId 要指向它）。
+    """
+    if not lines:
+        return
+    await conn.execute(DELETE_STARTED_LINES, (novel_id, chapter_id))
+    for line in lines:
+        if line["action"] == "open":
+            await conn.execute(
+                LINE_INSERT,
+                (
+                    line.get("id") or uuid.uuid4().hex,
+                    novel_id,
+                    line["level"],
+                    SETTING_STATUS,
+                    chapter_order,
+                    line["content"],
+                    line.get("parentId") or None,
+                    chapter_id,
+                ),
+            )
+        elif line["action"] == "close":
+            await conn.execute(LINE_CLOSE, (chapter_id, line["id"], novel_id))
+            if line["level"] == "phase":
+                await conn.execute(LINE_CLOSE_CHILDREN, (chapter_id, novel_id, line["id"]))
+        elif line["action"] == "continue" and line["content"]:
+            await conn.execute(LINE_UPDATE_CONTENT, (line["content"], line["id"], novel_id))
 
 
 def _clip_cell(value: Any, limit: int = MAX_FACT_CELL_CHARS) -> str:

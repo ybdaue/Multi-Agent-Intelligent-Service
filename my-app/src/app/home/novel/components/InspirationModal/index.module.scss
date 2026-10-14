@@ -88,6 +88,43 @@
   }
 }
 
+.modes {
+  display: flex;
+  gap: 0.375rem;
+}
+
+.modeBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  padding: 0.5rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover:not(:disabled) {
+    border-color: var(--color-primary-light);
+    color: var(--color-primary);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
+.modeBtnOn {
+  border-color: var(--color-primary);
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+}
+
 .urlRow {
   display: flex;
   gap: 0.5rem;
@@ -114,7 +151,8 @@
   }
 }
 
-.addUrlBtn {
+.addUrlBtn,
+.clearBtn {
   flex-shrink: 0;
   padding: 0.5rem 0.875rem;
   border: 1px solid var(--color-border);
@@ -134,6 +172,95 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+}
+
+/* 单素材模式下选好的文件就地显示：长得跟列表里的条目一致，只是不放在 ul 里 */
+.filePicked {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+}
+
+.textRow {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.textArea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.625rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  background: var(--color-surface);
+  color: var(--color-text);
+  transition: border-color 150ms;
+
+  &::placeholder { color: var(--color-text-tertiary); }
+
+  &:focus {
+    border-color: var(--color-primary-light);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+  }
+}
+
+.categoryRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.categoryLabel {
+  flex-shrink: 0;
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+}
+
+.categoryChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.categoryChip {
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover {
+    border-color: var(--color-primary-light);
+    color: var(--color-primary);
+  }
+}
+
+.categoryChipOn {
+  border-color: var(--color-primary);
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+}
+
+.categoryHint {
+  flex-basis: 100%;
+  font-size: 0.6875rem;
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
 }
 
 .listWrap {
@@ -224,9 +351,17 @@
   flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 0.5rem;
   padding: 0.875rem 1.25rem;
   border-top: 1px solid var(--color-border);
+}
+
+/* 翻译失败时的提示：靠左，别跟按钮挤在一起 */
+.footerError {
+  margin-right: auto;
+  font-size: 0.75rem;
+  color: #ef4444;
 }
 
 .cancelBtn,
@@ -236,6 +371,21 @@
   font-size: 0.8125rem;
   cursor: pointer;
   transition: all 150ms;
+}
+
+.confirmBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .cancelBtn {

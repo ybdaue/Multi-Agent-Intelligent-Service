@@ -23,6 +23,77 @@
   color: #ef4444;
 }
 
+/* 视图切换 + 搜索那一整条 */
+.controls {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.viewSwitch {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.viewBtn {
+  padding: 0.25rem 0.75rem;
+  border: none;
+  background: var(--color-surface);
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 150ms, color 150ms;
+
+  & + .viewBtn {
+    border-left: 1px solid var(--color-border);
+  }
+
+  &:hover {
+    color: var(--color-primary);
+  }
+}
+
+.activeView {
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.filterInput {
+  padding: 0.1875rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  font-size: 0.75rem;
+  color: var(--color-text);
+  outline: none;
+
+  &:focus {
+    border-color: var(--color-primary);
+  }
+
+  /* 关键词 / 章节号收窄一点，日期框本身有自己的宽度 */
+  &[placeholder] {
+    width: 7rem;
+  }
+}
+
+.rangeSep {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+}
+
 .groups {
   display: flex;
   flex-direction: column;

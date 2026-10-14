@@ -1,0 +1,393 @@
+.panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
+}
+
+.hint {
+  padding: 2rem 0;
+  text-align: center;
+  font-size: 0.8125rem;
+  color: var(--color-text-tertiary);
+}
+
+.topBar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.summary {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+}
+
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.875rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 150ms;
+
+  &:hover {
+    background: var(--color-primary-dark);
+  }
+}
+
+.actionError {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: #ef4444;
+}
+
+.controls {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.chip {
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover {
+    border-color: var(--color-primary-light);
+    color: var(--color-primary);
+  }
+}
+
+.chipOn {
+  border-color: var(--color-primary);
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+}
+
+.filters {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.filterInput {
+  flex: 1;
+  min-width: 0;
+  padding: 0.4375rem 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font: inherit;
+  font-size: 0.8125rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+  transition: border-color 150ms;
+
+  &::placeholder { color: var(--color-text-tertiary); }
+
+  &:focus {
+    border-color: var(--color-primary-light);
+  }
+}
+
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.sourceHead {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.formIcon {
+  flex-shrink: 0;
+  margin-top: 0.125rem;
+  font-size: 0.875rem;
+  color: var(--color-primary);
+}
+
+/* 素材头中间那栏：标题在上、原文在下 */
+.sourceText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+/* 素材原文的标题（取原文首行），一眼看出这张卡是哪份素材 */
+.sourceTitle {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sourceActions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.125rem;
+}
+
+/* 原文：素材本体，可能是多行，封个高度免得一条长素材把整张卡撑爆 */
+.sourceContent {
+  min-width: 0;
+  max-height: 5.5rem;
+  overflow-y: auto;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar { display: none; }
+}
+
+/* 同一份素材产出的各条灵感，一条一个子块，用虚线隔开 */
+.inspList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.inspBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 0.25rem;
+  padding-top: 0.625rem;
+  border-top: 1px dashed var(--color-border);
+}
+
+.inspHead {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* 这条灵感"是什么"：左侧只读分类标签，比右侧的 usage 下拉更弱，一眼看出这条属于哪一类 */
+.inspCat {
+  flex-shrink: 0;
+  padding: 0.0625rem 0.4375rem;
+  border-radius: 999px;
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.inspTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 使用策略下拉框：扁圆小框，按当前策略上色，一眼看得出现在是必用 / 选用 / 不用 */
+.usageSelect {
+  flex-shrink: 0;
+  padding: 0.0625rem 0.375rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.usage_must {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.usage_selectable {
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+}
+
+.usage_never {
+  background: var(--color-border);
+  color: var(--color-text-tertiary);
+}
+
+.iconBtn {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  font-size: 0.8125rem;
+  padding: 0.25rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 150ms;
+
+  &:hover:not(:disabled) {
+    color: var(--color-primary);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.cardField {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.fieldLabel {
+  flex-shrink: 0;
+  width: 3.5rem;
+  color: var(--color-text-tertiary);
+  font-size: 0.75rem;
+}
+
+.fieldValue {
+  flex: 1;
+  min-width: 0;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cardFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.125rem;
+}
+
+.usedTag {
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--color-primary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.unusedTag {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+}
+
+.catChip {
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 0.6875rem;
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover:not(:disabled) {
+    border-color: var(--color-primary-light);
+    color: var(--color-primary);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.catChipOn {
+  border-color: var(--color-primary);
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+}
+
+/* 生命周期是固定值、不可改，只读展示：比 usage 的按钮弱一档，一眼分得清哪个能点 */
+.lifeTag {
+  padding: 0.125rem 0.5rem;
+  border: 1px dashed var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-tertiary);
+  font-size: 0.6875rem;
+  cursor: default;
+}
+
+.catRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3125rem;
+}
+
+.deleteBtn {
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  font-size: 0.8125rem;
+  padding: 0.25rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 150ms;
+
+  &:hover:not(:disabled) {
+    color: #ef4444;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}

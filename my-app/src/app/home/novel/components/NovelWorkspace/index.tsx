@@ -111,6 +111,8 @@ interface NovelListResponse {
     wordCount: number;
     tropes: string;
     style: string;
+    /** AI 审稿开关（novel.reviewEnabled） */
+    reviewEnabled: boolean;
     chapters: {
       id: string;
       title: string;
@@ -197,6 +199,20 @@ export default function NovelWorkspace() {
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   /** 已经向哪本书问过一次"历史 + 有没有待确认的稿"，免得每次重渲染都去打后端 */
   const hydrateRef = useRef<string | null>(null);
+  /**
+   * 组件是不是还挂着 —— 取数回来时用它判断该不该写 state。
+   *
+   * 不能拿"每次 effect 重跑就置假的 alive 变量"当守卫：StrictMode 下 effect 会 setup→cleanup
+   * →setup 跑两遍，第一遍发起的取数被判死、第二遍又被 hydrateRef 挡下，历史就永远铺不上（退出
+   * 登录重进、刷新都中招）。真正卸载才算不可用，所以单开这个 ref，setup 时置回真、卸载时置假。
+   */
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   /** 已经为哪本书提过一次"上一轮中断了"，免得在几本书之间切来切去时反复说；重开一轮就销账 */
   const toldInterruptedRef = useRef<Set<string>>(new Set());
   /** 手改正文的防抖定时器：按键期间不发，停手 800ms 才落一次库 */
@@ -282,6 +298,7 @@ export default function NovelWorkspace() {
         wordCount: item.wordCount ?? 0,
         tropes: item.tropes ?? "",
         style: item.style ?? "",
+        reviewEnabled: item.reviewEnabled ?? true,
         // 设定收齐就算建成，但可能一章都还没写；补个占位章，正文区才有个落脚的地方
         chapters:
           item.chapters.length > 0 ? item.chapters.map(toChapter) : [pendingChapter(item.id)],
@@ -542,6 +559,24 @@ export default function NovelWorkspace() {
     },
     [novels, handle_edit_novel_meta],
   );
+
+  /** 章节栏那个「AI 审稿」开关：先改本地再写库，失败回滚（口径同 handle_edit_novel_meta）。 */
+  const handle_toggle_review_novel = useCallback((novel: Novel, on: boolean) => {
+    if (novel.reviewEnabled === on) return;
+    const patch = (v: boolean) =>
+      setNovels((prev) => prev.map((n) => (n.id === novel.id ? { ...n, reviewEnabled: v } : n)));
+
+    patch(on);
+    const form = new FormData();
+    form.append("novelId", novel.id);
+    form.append("reviewEnabled", on ? "true" : "false");
+    mutateNovel("/api/novel/method/novel", { method: "PATCH", body: form }).catch(
+      (err: unknown) => {
+        patch(!on);
+        setLoadError(err instanceof Error ? err.message : "审稿开关没能改掉");
+      },
+    );
+  }, []);
 
   const handleDeleteNovel = useCallback(
     (novel: Novel) => {
@@ -871,10 +906,12 @@ export default function NovelWorkspace() {
     hydrateRef.current = activeNovelId;
 
     const novelId = activeNovelId;
-    let alive = true;
+    // 取数回来时是不是已经没用了：组件卸载、或用户已经切到别的书。同一本书内因别的 state 变化
+    // 重跑这个 effect 不算 —— 那种情况 hydrateRef 仍指着这一本，取回的历史照旧铺得上。
+    const stale = () => !mountedRef.current || hydrateRef.current !== novelId;
     (async () => {
       const history = await fetchNovelHistory(novelId);
-      if (!alive) return;
+      if (stale()) return;
       // 历史当底铺一次。本地已经有这一本的对话（本页刚跑过一轮、或上一段恢复补过）就不铺了 ——
       // 本页手上那份总不比后端旧，铺下去只会把刚流出来的那些话挤掉。
       const seeded = toHistoryMessages(history);
@@ -883,7 +920,7 @@ export default function NovelWorkspace() {
       }
 
       const res = await fetchNovelPending(novelId, activeChapterId ?? "");
-      if (!alive) return;
+      if (stale()) return;
       if (!res.pending || !res.draft) {
         // 上一轮中途断了（断网、点了停止）：后端记着这一笔，说一句让用户重发。
         // 一本书只说一次 —— 在几本书之间切来切去不该反复念叨；重开一轮就把这条销掉。
@@ -914,9 +951,6 @@ export default function NovelWorkspace() {
       });
       if (res.text) pushMessage(novelId, "assistant", res.text);
     })().catch(() => {});   // 问不到就当没有：不该因为恢复不了而把界面卡住
-    return () => {
-      alive = false;
-    };
   }, [
     activeNovel,
     activeNovelId,
@@ -1198,6 +1232,7 @@ export default function NovelWorkspace() {
         tab={tab}
         onTabChange={setTab}
         threadId={activeNovelId}
+        chapters={activeNovel?.chapters ?? []}
         chapter={activeChapter}
         onContentChange={handleContentChange}
         onChangeStatus={(status) => {
@@ -1217,6 +1252,10 @@ export default function NovelWorkspace() {
         onAnswer={handleAnswer}
         onClear={handleClearChat}
         runChapter={runBadge}
+        reviewEnabled={activeNovel?.reviewEnabled ?? true}
+        onToggleReview={(on) => {
+          if (activeNovel) handle_toggle_review_novel(activeNovel, on);
+        }}
       />
       <LedgerModal
         threadId={activeNovelId}

@@ -10,19 +10,6 @@ const configInit = () => {
     reactStrictMode: true,
     devIndicators: false,
     allowedDevOrigins: ["localhost", "26.41.157.27"],
-    async rewrites() {
-      return [
-        {
-          source: "/api/finance/:path*",
-          destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/finance/:path*`,
-        },
-        {
-          source: "/api/agent/:path*",
-          destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/agent/:path*`,
-        },
-        // billing 和 admin 由 API Route Handler 代理（注入 Authorization header）
-      ];
-    },
     headers: () => {
       return [
         {

@@ -22,6 +22,11 @@
   overflow: hidden;
 }
 
+/* 带右侧设定面板时弹窗加宽 */
+.withPanel {
+  max-width: 54rem;
+}
+
 .header {
   flex-shrink: 0;
   display: flex;
@@ -246,4 +251,389 @@
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+/* ════════════════════════════════════
+   两栏布局：左侧聊天 + 右侧设定面板
+   ════════════════════════════════════ */
+
+.mainArea {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+.chatColumn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── 右侧设定面板 ── */
+
+.settingsPanel {
+  width: 18rem;
+  flex-shrink: 0;
+  border-left: 1px solid var(--color-border);
+  padding: 0.75rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  background: var(--color-bg);
+}
+
+.panelTitle {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.loadingHint,
+.emptyHint {
+  font-size: 0.6875rem;
+  color: var(--color-text-tertiary);
+  margin: 0;
+  font-style: italic;
+}
+
+/* ── 设定卡片列表 ── */
+
+.fieldList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.fieldCard {
+  padding: 0.5rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  transition: border-color 150ms;
+
+  &.collected {
+    border-left: 3px solid var(--color-primary);
+  }
+
+  &.pending {
+    border-left: 3px solid var(--color-text-tertiary);
+    opacity: 0.75;
+  }
+}
+
+.fieldHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.statusDot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dotDone {
+  background: var(--color-primary);
+}
+
+.dotEmpty {
+  background: var(--color-text-tertiary);
+}
+
+.fieldLabel {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editBtn {
+  flex-shrink: 0;
+  padding: 0.0625rem 0.375rem;
+  font-size: 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: all 150ms;
+  line-height: 1.6;
+
+  &:hover:not(:disabled) {
+    border-color: var(--color-primary-light);
+    color: var(--color-primary);
+  }
+
+  &:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+}
+
+.fieldContent {
+  margin: 0.25rem 0 0;
+  font-size: 0.625rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.fieldEmpty {
+  margin: 0.25rem 0 0;
+  font-size: 0.625rem;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+/* ── 子字段（大分类下的小分类）── */
+
+.subFieldList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  margin-top: 0.375rem;
+  padding-top: 0.375rem;
+  border-top: 1px dashed var(--color-border);
+}
+
+.subFieldItem {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3125rem;
+  font-size: 0.625rem;
+  line-height: 1.5;
+}
+
+.subFieldDone {
+  color: var(--color-text-secondary);
+}
+
+.subFieldEmpty {
+  color: var(--color-text-tertiary);
+}
+
+.subFieldDot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.subFieldName {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.subFieldValue {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subFieldReq {
+  color: var(--color-error, #ff4d4f);
+  margin-left: 0.0625rem;
+}
+
+/* ── 依赖关系可视化 ── */
+
+.depSection {
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.5rem;
+}
+
+.depTitle {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin: 0 0 0.25rem;
+}
+
+.depRow {
+  margin: 0.125rem 0;
+  font-size: 0.625rem;
+  line-height: 1.7;
+  color: var(--color-text-tertiary);
+}
+
+.depFrom {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.depArrow {
+  margin: 0 0.25rem;
+  color: var(--color-text-tertiary);
+}
+
+.depTo {
+  color: var(--color-text-secondary);
+}
+
+/* ── 编辑弹框 ── */
+
+.editOverlay,
+.confirmOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.35);
+  animation: fadeIn 120ms ease;
+}
+
+.editDialog,
+.confirmDialog {
+  width: 28rem;
+  max-width: 90vw;
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  padding: 1.25rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+.editTitle {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.editTextarea {
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.5rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  resize: vertical;
+  background: var(--color-bg);
+  color: var(--color-text);
+  transition: border-color 150ms;
+  box-sizing: border-box;
+
+  &:focus {
+    border-color: var(--color-primary-light);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+  }
+}
+
+.editActions,
+.confirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* 结构化字段：按子分类逐项编辑 */
+
+.editSubList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.editSubRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.editSubLabel {
+  flex-shrink: 0;
+  width: 6.5rem;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+.editSubInput {
+  flex: 1;
+  min-width: 0;
+  padding: 0.375rem 0.5rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font: inherit;
+  font-size: 0.75rem;
+  background: var(--color-bg);
+  color: var(--color-text);
+  transition: border-color 150ms;
+  box-sizing: border-box;
+
+  &:focus {
+    border-color: var(--color-primary-light);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+  }
+}
+
+/* ── 依赖确认弹框 ── */
+
+.confirmHeading {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.confirmWarning {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--color-warning, #d97706);
+}
+
+.confirmDialog ul {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+}
+
+/* ── 按钮复用 ── */
+
+.saveBtn,
+.confirmBtn {
+  padding: 0.375rem 1rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: background 150ms;
+
+  &:hover:not(:disabled) {
+    background: var(--color-primary-dark);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 }

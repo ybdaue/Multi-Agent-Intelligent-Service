@@ -12,7 +12,7 @@ ON CONFLICT 保证重跑不翻倍）。字段白名单与 ledger.py 认同一份
 """
 import uuid
 
-from .ledger import FACT_SKIP_COLUMNS, NEW_ENTITY_SPEC, TYPE_LABEL
+from ...utils.ledger import FACT_SKIP_COLUMNS, NEW_ENTITY_SPEC, TYPE_LABEL
 
 # 能改的八类：七类照 NEW_ENTITY_SPEC（字段白名单同一份），大纲是外加的（不能新造但能改）。
 EDIT_SPEC = {

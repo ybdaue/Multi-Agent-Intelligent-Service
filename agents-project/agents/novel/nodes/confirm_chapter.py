@@ -114,12 +114,18 @@ async def confirm_chapter(state: State, config: RunnableConfig) -> Command:
     order = chapter.get("chapter_order")
     attempt = state.get("chapter_attempt", 0)
     passed = review.get("passed", True)
+    review_enabled = state.get("review_enabled", True)
     problems = (review.get("problems") or "").strip() or "审查这一关没过，但没写出具体问题。"
 
     conflicts = list(state.get("chapter_conflicts") or [])
 
     if passed:
-        head = f"第 {order} 章写完了（第 {attempt} 稿），审查这一关过了。"
+        # 审稿关掉的书没有"审查这一关"，别对它说一句不存在的过关。
+        head = (
+            f"第 {order} 章写完了（第 {attempt} 稿），审查这一关过了。"
+            if review_enabled
+            else f"第 {order} 章写完了（第 {attempt} 稿）。"
+        )
     else:
         head = f"第 {order} 章写完了（第 {attempt} 稿），但审查这一关没过：\n\n{problems}"
 
@@ -139,6 +145,13 @@ async def confirm_chapter(state: State, config: RunnableConfig) -> Command:
         question = f"{head}\n\n收下它、我这就存进这一章？要再改改的话，直接说往哪儿改。"
     else:
         question = f"{head}\n\n要我按这些意见改一版，还是就这样收下？要改的话说一句往哪儿改。"
+
+    # 审稿关掉的书：这一稿没走 reader，收下前得把风险说清楚 —— 用户点"收下"时心里有数。
+    if not review_enabled:
+        question += (
+            "\n\n注意：这本小说关掉了 AI 审稿 —— 这一稿没经过连贯性 / 人物设定 / 文风检查，"
+            "直接收下入库有风险。"
+        )
 
     # 选项给前端做按钮。审查没过、或有偏离时才多一个"改"的出口 —— 其余情况收下是唯一去路。
     options = [{"id": "keep", "label": "收下并保留" if conflicts else "收下并保存"}]
@@ -171,7 +184,10 @@ async def confirm_chapter(state: State, config: RunnableConfig) -> Command:
                     "edit_feedback": "",
                 }
                 if conflicts:
-                    update["change_impact"] = _impact_rows(conflicts, order)
+                    # reader 已把审出的问题行写进 state；这里追加偏离行，别把它覆盖掉。
+                    update["change_impact"] = (
+                        list(state.get("change_impact") or []) + _impact_rows(conflicts, order)
+                    )
                 return Command(goto="update", update=update)
         text = reply.content if isinstance(reply.content, str) else ""
         keep, feedback = verdict(text, "keep")
@@ -188,7 +204,10 @@ async def confirm_chapter(state: State, config: RunnableConfig) -> Command:
         # 偏离行只在用户点了保留时才记 —— 那是他拍板"就这么写下去"。将来回头改库里那几条设定
         # 时得知道有这么一章跟它对不上。落库在 update（setting_changes 为空、只有影响行也照写）。
         if conflicts:
-            update["change_impact"] = _impact_rows(conflicts, order)
+            # 保留 state 里 reader 写的审查问题行，再把这几处偏离追加上去。
+            update["change_impact"] = (
+                list(state.get("change_impact") or []) + _impact_rows(conflicts, order)
+            )
         return Command(goto="update", update=update)
 
     # 说得出"要改哪儿"才回炉（feedback 是用户原话，按钮那条已经替他说清了）。

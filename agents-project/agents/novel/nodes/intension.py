@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from ..utils import INTENT_PROMPT, _intentModel_backup, recent_history
 from ..utils.chapter_information import get_chapter_order
-from ..utils.retry import with_retry_and_fallback
+from .utils.retry import with_retry_and_fallback
 from typing import Optional
 import json
 

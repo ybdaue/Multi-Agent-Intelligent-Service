@@ -10,6 +10,7 @@ import {
   FileTextOutlined,
   GiftOutlined,
   GlobalOutlined,
+  HighlightOutlined,
   HistoryOutlined,
   ReadOutlined,
   ShareAltOutlined,
@@ -17,6 +18,7 @@ import {
 } from "@ant-design/icons";
 import ChapterBody from "../ChapterBody";
 import ImpactsPanel from "../ImpactsPanel";
+import InspirationPanel from "../InspirationPanel";
 import SettingPanel from "../SettingPanel";
 import { PANEL_SPECS } from "../SettingPanel/specs";
 import type {
@@ -42,6 +44,7 @@ const WORK_TABS: {
   { key: "factions", label: "势力阵营", Icon: AppstoreOutlined },
   { key: "chronicle", label: "编年史", Icon: HistoryOutlined },
   { key: "items", label: "物品设定", Icon: GiftOutlined },
+  { key: "foreshadowing", label: "伏笔", Icon: HighlightOutlined },
   { key: "relations", label: "关系图", Icon: ShareAltOutlined },
   { key: "inspiration", label: "灵感库", Icon: BulbOutlined },
   { key: "export", label: "全书导出", Icon: ExportOutlined },
@@ -53,6 +56,8 @@ interface WorkAreaProps {
   onTabChange: (tab: WorkTab) => void;
   /** 当前这本书的 id（也就是会话 threadId），各标签页照着它去库里取数 */
   threadId: string | null;
+  /** 这本书的章节列表，灵感库按它做章节筛选、把 usedChapterIds 显示成章名 */
+  chapters: Chapter[];
   chapter: Chapter | null;
   onContentChange: (content: string) => void;
   /** 改当前这一章的状态（完成 / 草稿 / 待修复），落库 */
@@ -78,12 +83,16 @@ interface WorkAreaProps {
   onClear: () => void;
   /** 本轮正在生成的那一章，写在正文区标题栏右边；null = 没有在跑的 */
   runChapter: RunChapter | null;
+  /** 这本书的 AI 审稿开关（挂在右侧对话面板顶部） */
+  reviewEnabled: boolean;
+  onToggleReview: (on: boolean) => void;
 }
 
 export default function WorkArea({
   tab,
   onTabChange,
   threadId,
+  chapters,
   chapter,
   onContentChange,
   onChangeStatus,
@@ -99,6 +108,8 @@ export default function WorkArea({
   onAnswer,
   onClear,
   runChapter,
+  reviewEnabled,
+  onToggleReview,
 }: WorkAreaProps) {
   const activeTab = WORK_TABS.find((t) => t.key === tab) ?? WORK_TABS[0];
   const ActiveIcon = activeTab.Icon;
@@ -128,6 +139,7 @@ export default function WorkArea({
               onChangeStatus={onChangeStatus}
               messages={messages}
               onSend={onSend}
+              threadId={threadId}
               draft={draft}
               stage={stage}
               chatDisabled={chatDisabled}
@@ -138,6 +150,8 @@ export default function WorkArea({
               onAnswer={onAnswer}
               onClear={onClear}
               runChapter={runChapter}
+              reviewEnabled={reviewEnabled}
+              onToggleReview={onToggleReview}
             />
           ) : (
             <div className={styles.placeholder}>
@@ -150,6 +164,8 @@ export default function WorkArea({
           )
         ) : tab === "impacts" ? (
           <ImpactsPanel threadId={threadId} />
+        ) : tab === "inspiration" ? (
+          <InspirationPanel threadId={threadId} chapters={chapters} />
         ) : PANEL_SPECS[tab] ? (
           // 一个按钮一个口子：这张表里没有的就是还没有库表支撑的（导出是前端自己拼的）
           <SettingPanel threadId={threadId} spec={PANEL_SPECS[tab]!} />

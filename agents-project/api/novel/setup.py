@@ -207,3 +207,54 @@ async def resume_setup(
         graph_input=Command(resume=answer),
         callbacks=[handler] if handler else None,
     )
+
+
+@router.get("/settings")
+async def get_setup_settings(
+    request: Request,
+    novelId: str = "",
+):
+    """返回开书图的设定收集状态（从 checkpoint 读取，不修改任何数据）。
+
+    前端右侧面板用它渲染和刷新。checkpoint 还没建起来时返回全空状态 —— 不报错，不打断用户。
+    """
+    from agents.novel.setup.settings import (
+        DEPENDENCIES,
+        SETTING_FIELDS,
+        SETTING_LABELS,
+        get_sub_field_status,
+        render_item,
+    )
+
+    if not novelId.strip():
+        raise HTTPException(status_code=400, detail="缺少小说 id")
+
+    user_id = str(request.state.user_id)
+    try:
+        snapshot = await novel_setup_agent.aget_state(_config(user_id, novelId))
+        values = dict(snapshot.values or {})
+        settings = values.get("settings") or {}
+    except Exception:
+        settings = {}
+
+    fields = []
+    for f in SETTING_FIELDS:
+        raw = settings.get(f)
+        collected = bool(raw)
+        content = render_item(f, raw) if collected else ""
+        # 子字段清单始终返回（未收集时全为 False），让面板能一直展示"要收集哪些子项"
+        sub_fields = get_sub_field_status(f, raw)
+        entry = {
+            "field": f,
+            "label": SETTING_LABELS.get(f, f),
+            "content": content,
+            "collected": collected,
+        }
+        if sub_fields:
+            entry["sub_fields"] = sub_fields
+        fields.append(entry)
+
+    return {
+        "fields": fields,
+        "dependencies": dict(DEPENDENCIES),
+    }

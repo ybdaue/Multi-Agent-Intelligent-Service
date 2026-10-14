@@ -15,7 +15,7 @@ api/novel/setup.py 的开书图，由模型照着 skill 逐项问齐、用户过
 threadId，所以入口认这个名字；库里存的是 novelId，两个值本来就是同一个。
 
 一个接口对应前端一个按钮：/novels 是侧栏书架，其余是工作区各标签页（正文 / 大纲 / 角色 /
-世界观 / 世界线 / 势力阵营 / 编年史 / 物品 / 关系 / 灵感 / 受影响点）。返回的键直接用库里的
+世界观 / 世界线 / 势力阵营 / 编年史 / 物品 / 伏笔 / 关系 / 灵感 / 受影响点）。返回的键直接用库里的
 列名，前端按各自的标签页渲染，不在这里做人话转换 —— 只有台账与受影响点做了，因为那两处
 前端要的是"这条叫什么、这是什么类型"。
 
@@ -23,19 +23,36 @@ threadId，所以入口认这个名字；库里存的是 novelId，两个值本�
 它是影响分析的底账 —— 改设定时"哪些章会受波及"正是反查它算出来的。前端要展示只能走这里，
 没有别的口子。
 """
-from fastapi import APIRouter, Form, HTTPException, Query, Request
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from psycopg.errors import DataError
 
 from agents.novel.utils.chapter_information import NOVEL_WORD_COUNT_SQL, count_chapter_words
-from agents.novel.utils.ledger import CATALOG, TYPE_LABEL
+from agents.novel.utils.inspiration import (
+    add_inspirations,
+    parse_items,
+    reconcile_inspirations,
+    translate,
+)
+from agents.novel.utils.ledger import TYPE_LABEL
 from agents.novel.utils.run_state import RUNNING, read_run
 from api.utils.db import pg_pool
 
 router = APIRouter(prefix="/api/novel/method", tags=["小说服务"])
 
-# refType → (表名, 认得出这条叫什么的那一列)。照 ledger 的 CATALOG 来，不另立一份 ——
-# 目录、台账、档案三处认的是同一套表与列名，各自发明迟早对不上。
-_NAME_COLUMN = {ref_type: (table, label) for ref_type, table, label in CATALOG}
+# refType → (表名, 认得出这条叫什么的那一列)。表与列照 ledger.CATALOG 来，只是长文本取整列
+# 不截断 —— CATALOG 那份是喂给模型的目录，按 40 字截以省预算；台账是给用户看的，截了用户
+# 就见不到内容。分类顺序也照 CATALOG，前端据此排分组。
+_NAME_COLUMN = {
+    "character": ("novel_character", '"name"'),
+    "faction": ("novel_faction", '"name"'),
+    "item": ("novel_item", '"name"'),
+    "world_rule": ("novel_world_rule", '"name"'),
+    "timeline": ("novel_timeline", '"title"'),
+    "chronicle": ("novel_chronicle", '"title"'),
+    "outline": ("novel_outline", '"content"'),
+    "foreshadowing": ("novel_foreshadowing", '"description"'),
+    "inspiration": ("novel_inspiration", '"content"'),
+}
 
 # 戏份说成人话。取值来自 ledger.ROLE_VALUES，前端展示用；认不出就原样给出去。
 _ROLE_LABELS = {"key": "关键戏份", "state": "交代状态", "mention": "提及"}
@@ -64,6 +81,28 @@ CHAPTER_STATUSES = ("done", "draft", "fixing")
 # 会直接被拒，所以在这里先挡一道，好让错误是一句人话而不是一条数据库报错。
 IMPACT_STATUSES = ("pending", "accepted", "skipped", "fixed")
 
+# novel_inspiration.category 的内容类型，与前端 types.ts 的 INSPIRATION_CATEGORY_OPTIONS 一一对应
+# （照 CHAPTER_STATUSES 的做法，前后端各留一份常量）。库里是 text[] 数组列，没约束，所以在这里挡一道。
+INSPIRATION_CATEGORIES = (
+    "style", "plot", "character", "meme", "setting",
+    "scene", "dialogue", "imagery", "emotion", "technique", "other",
+)
+
+# 使用策略（必用 / 选用 / 不用）是普通字符串列，在这里挡一道白名单。生命周期（复用 / 单次）固定、
+# 由分类自动定（见 inspiration.py 的 default_lifecycle），用户改不了，所以没有对应的入参白名单。
+INSPIRATION_USAGE = ("must", "selectable", "never")
+
+
+def _clean_categories(raw: list[str]) -> list[str]:
+    """把前端传来的类型过一遍白名单：认不出的丢掉，一个都不剩就退回 other（对应列默认值）。"""
+    known = [c for c in raw if c in INSPIRATION_CATEGORIES]
+    return list(dict.fromkeys(known)) or ["other"]
+
+
+def _clean_usage(raw: str) -> str:
+    """使用策略过白名单：认不出就退回 selectable。"""
+    return raw if raw in INSPIRATION_USAGE else "selectable"
+
 
 async def _own_novel(conn, novel_id: str, user_id: str) -> bool:
     """这本书是不是这个用户的。不是就当"不存在"处理 —— 别让接口能探出别人有哪些书。"""
@@ -82,7 +121,8 @@ async def _require_novel(conn, novel_id: str, user_id: str) -> None:
 # 各设定表要出的列（库里的列名，也是返回体的键）。逐表列清楚，不 SELECT *：
 # 表结构加了列不会莫名其妙地漏到前端去。
 _COLUMNS: dict[str, tuple[str, ...]] = {
-    "novel_outline": ("id", "content", "status", "startChapterId", "endChapterId", "order"),
+    "novel_outline": ("id", "level", "content", "status", "parentId", "startChapterId",
+                      "endChapterId", "order"),
     "novel_character": ("id", "name", "sex", "age", "birthYear", "deathYear", "description",
                         "identity", "personality", "ability", "role"),
     "novel_world_rule": ("id", "name", "rule", "status", "startChapterId", "endChapterId"),
@@ -94,7 +134,10 @@ _COLUMNS: dict[str, tuple[str, ...]] = {
                    "status", "ownerId"),
     "novel_relation": ("id", "fromCharId", "toCharId", "relationType", "strength",
                        "description", "startChapterId", "endChapterId", "status"),
-    "novel_inspiration": ("id", "type", "content", "usedChapterIds"),
+    "novel_foreshadowing": ("id", "description", "status", "plantedChapterId",
+                            "resolvedChapterId"),
+    "novel_inspiration": ("id", "sourceId", "title", "category", "type", "content", "usage",
+                          "lifecycle", "scenario", "digest", "usedChapterIds"),
 }
 
 
@@ -121,11 +164,22 @@ async def _char_names(conn, novel_id: str) -> dict[str, str]:
     return {row[0]: row[1] for row in await cur.fetchall()}
 
 
+async def _chapter_names(conn, novel_id: str) -> dict[str, str]:
+    """章节 id → "第N章 标题"。伏笔的埋设 / 回收章节要给人看，给个 cuid 前端没法显示。"""
+    cur = await conn.execute(
+        'SELECT id, "order", title FROM novel_chapter WHERE "novelId" = %s', (novel_id,)
+    )
+    return {
+        row[0]: (f"第{row[1]}章 {row[2]}".strip() if row[2] else f"第{row[1]}章")
+        for row in await cur.fetchall()
+    }
+
+
 async def _ref_names(conn, novel_id: str, refs: list[tuple]) -> dict[tuple[str, str], str]:
     """把 refId 换成"这条叫什么"，给前端展示用。
 
-    目标可能是九类里的任何一类，认名字的列各不相同（人物认 name、大纲认 content 的头 40 字，
-    见 ledger.CATALOG），所以按类型分批发：每类一条 SQL，一次把该类要用的 id 全查回来。
+    目标可能是九类里的任何一类，认名字的列各不相同（人物认 name、大纲认 content 整段）——
+    见 _NAME_COLUMN。所以按类型分批发：每类一条 SQL，一次把该类要用的 id 全查回来。
     查不到的（行被删了、id 是模型编的）就不出现在结果里，对应那一条的名字留空。
     """
     wanted: dict[str, list[str]] = {}
@@ -143,7 +197,7 @@ async def _ref_names(conn, novel_id: str, refs: list[tuple]) -> dict[tuple[str, 
             (novel_id, ref_ids),
         )
         for ref_id, name in await cur.fetchall():
-            names[(ref_type, ref_id)] = " ".join(str(name or "").split())
+            names[(ref_type, ref_id)] = str(name or "").strip()
     return names
 
 
@@ -157,7 +211,7 @@ async def list_novels(request: Request):
     user_id = request.state.user_id
     async with pg_pool.connection() as conn:
         cur = await conn.execute(
-            'SELECT id, title, "wordCount", tropes, style, "updatedAt" FROM novel '
+            'SELECT id, title, "wordCount", tropes, style, "reviewEnabled", "updatedAt" FROM novel '
             'WHERE "userId" = %s ORDER BY "updatedAt" DESC',
             (user_id,),
         )
@@ -193,10 +247,11 @@ async def list_novels(request: Request):
                 "wordCount": word_count,
                 "tropes": tropes or "",
                 "style": style or "",
+                "reviewEnabled": True if review_enabled is None else bool(review_enabled),
                 "updatedAt": updated_at,
                 "chapters": by_novel.get(novel_id, []),
             }
-            for novel_id, title, word_count, tropes, style, updated_at in novels
+            for novel_id, title, word_count, tropes, style, review_enabled, updated_at in novels
         ],
     }
 
@@ -316,6 +371,23 @@ async def list_relations(request: Request, threadId: str):
         row["fromName"] = names.get(row.get("fromCharId") or "", "")
         row["toName"] = names.get(row.get("toCharId") or "", "")
     return {"threadId": threadId, "total": len(rows), "relations": rows}
+
+
+@router.get("/foreshadowings")
+async def list_foreshadowings(request: Request, threadId: str):
+    """伏笔标签页：埋设 / 回收章节给的是章名，plantedChapterId / resolvedChapterId 是个 cuid。
+
+    这两列落的是 novel_chapter.id，前端拿着没法显示，所以照 "第N章 标题" 补一份再给出去。
+    """
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, threadId, request.state.user_id)
+        rows = await _rows(conn, "novel_foreshadowing", threadId, '"createdAt", id')
+        chapters = await _chapter_names(conn, threadId) if rows else {}
+
+    for row in rows:
+        row["plantedChapter"] = chapters.get(row.get("plantedChapterId") or "", "")
+        row["resolvedChapter"] = chapters.get(row.get("resolvedChapterId") or "", "")
+    return {"threadId": threadId, "total": len(rows), "foreshadowings": rows}
 
 
 @router.get("/inspirations")
@@ -628,9 +700,10 @@ async def edit_novel_meta(
     title: str | None = Form(None, description="新书名，不传就不动"),
     tropes: str | None = Form(None, description="新的类型 / 套路，不传就不动"),
     style: str | None = Form(None, description="新的文风，不传就不动"),
+    reviewEnabled: str | None = Form(None, description="是否开启 AI 审稿：true / false，不传就不动"),
 ):
-    """改书名 / 类型 / 文风：只改传上来的那几项，没传的原样留着。"""
-    fields: list[tuple[str, str]] = []
+    """改书名 / 类型 / 文风 / AI 审稿开关：只改传上来的那几项，没传的原样留着。"""
+    fields: list[tuple[str, object]] = []
     if title is not None:
         title = title.strip()
         if not title:
@@ -640,17 +713,22 @@ async def edit_novel_meta(
         fields.append(("tropes", tropes.strip()))
     if style is not None:
         fields.append(("style", style.strip()))
+    if reviewEnabled is not None:
+        value = reviewEnabled.strip().lower()
+        if value not in ("true", "false"):
+            raise HTTPException(status_code=400, detail="reviewEnabled 只能是 true 或 false")
+        fields.append(("reviewEnabled", value == "true"))
     if not fields:
         raise HTTPException(status_code=400, detail="没有要改的内容")
 
-    # 列名取自上面写死的三个，没有一个字来自请求，所以这里的拼接安全；值一律走 %s。
+    # 列名取自上面写死的四个，没有一个字来自请求，所以这里的拼接安全；值一律走 %s。
     assignments = ", ".join(f'"{column}" = %s' for column, _ in fields)
     params = [value for _, value in fields] + [novelId, request.state.user_id]
 
     async with pg_pool.connection() as conn:
         cur = await conn.execute(
             f'UPDATE novel SET {assignments}, "updatedAt" = now() '
-            'WHERE id = %s AND "userId" = %s RETURNING title, tropes, style',
+            'WHERE id = %s AND "userId" = %s RETURNING title, tropes, style, "reviewEnabled"',
             tuple(params),
         )
         row = await cur.fetchone()
@@ -662,6 +740,7 @@ async def edit_novel_meta(
         "title": row[0] or "",
         "tropes": row[1] or "",
         "style": row[2] or "",
+        "reviewEnabled": True if row[3] is None else bool(row[3]),
     }
 
 
@@ -742,3 +821,146 @@ async def delete_novel(
     if row is None:
         raise HTTPException(status_code=404, detail="小说不存在")
     return {"novelId": novelId, "deleted": True}
+
+
+@router.post("/inspiration")
+async def create_inspirations(
+    request: Request,
+    novelId: str = Form(..., description="小说 ID（也就是 threadId）"),
+    category: list[str] = Form(
+        ["other"],
+        description="内容类型（可多选，尽量少选）：style/plot/character/meme/setting/scene/"
+        "dialogue/imagery/emotion/technique/other",
+    ),
+    usage: str = Form(
+        "", description="使用策略：must 必用 / selectable 选用 / never 不用；留空按分类默认（风格必用、其余选用）"
+    ),
+    inspirations: str = Form("[]", description="素材元信息 JSON 数组，一次只收一条"),
+    files: list[UploadFile] = File(default=[]),
+):
+    """往这本书的灵感库里加**一条**素材（文件 / 链接 / 文本），落库时按用户选的**每个分类各生成一条**灵感。
+
+    与 /run 挂素材同一个解析口径（parse_items），只是这里直接落库、不进图。一次只收一条素材：多传
+    直接 400。翻译模型按分类逐条提炼 title / scenario / digest，每条的 category 只归它自己那个分类；
+    usage 统一用用户选的（留空按分类默认）；lifecycle 按分类自动定、用户改不了（见 inspiration.py）。
+    新建各行（可能不止一条）的 id 由响应带回。
+    """
+    categories = _clean_categories(category)
+    usage_value = _clean_usage(usage) if usage else None
+
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, novelId, request.state.user_id)
+
+    items = await parse_items(inspirations, files)
+    if len(items) != 1:
+        raise HTTPException(status_code=400, detail="一次只能添加一条灵感")
+
+    source = items[0]
+    content = source.get("content") or ""
+    translated = await translate(content, categories)
+
+    # 翻译是最慢的一段：跑完再看一眼客户端还在不在。用户关窗 / 取消会 abort 掉请求，
+    # 这时别再落库 —— 否则"点了取消却凭空多出一条灵感"会很别扭。
+    if await request.is_disconnected():
+        raise HTTPException(status_code=499, detail="客户端已取消")
+
+    by_cat = {t["category"]: t for t in translated if t.get("category")}
+
+    created = [
+        {
+            "type": source.get("type") or "file",
+            "name": source.get("name") or "",
+            "content": content,
+            "title": (by_cat.get(cat) or {}).get("title") or source.get("name") or "",
+            "scenario": (by_cat.get(cat) or {}).get("scenario") or "",
+            "digest": (by_cat.get(cat) or {}).get("digest") or "",
+            "category": [cat],
+            "usage": usage_value,
+        }
+        for cat in categories
+    ]
+    written = await add_inspirations(novelId, created)
+    return {"threadId": novelId, "created": written}
+
+
+@router.post("/inspiration/translate")
+async def retranslate_inspiration(
+    request: Request,
+    novelId: str = Form(..., description="小说 ID（也就是 threadId）"),
+    inspirationId: list[str] = Form(..., description="这份素材现有的行 id（同一 sourceId 的多条）"),
+    category: list[str] = Form(default=[], description="这份素材要保留的标签；按它重建灵感"),
+):
+    """重新翻译一份素材：按素材卡上选的标签重跑模型，重新派生这份素材产出的灵感（缺的补、多的删）。
+
+    标签是重建的依据，所以至少选一个。已有行按标签就地复用（usage / lifecycle / usedChapterIds 保留），
+    只重写标题 / 场景 / 写作指引。详见 inspiration.py 的 reconcile_inspirations。
+    """
+    if not [i for i in inspirationId if i]:
+        raise HTTPException(status_code=400, detail="缺少灵感 id")
+    wanted = _clean_categories(category)
+    if not wanted:
+        raise HTTPException(status_code=400, detail="至少选一个标签")
+
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, novelId, request.state.user_id)
+
+    result = await reconcile_inspirations(novelId, inspirationId, wanted)
+    if not result:
+        raise HTTPException(status_code=404, detail="灵感不存在")
+    return {"threadId": novelId, "ids": result}
+
+
+@router.patch("/inspiration")
+async def edit_inspiration(
+    request: Request,
+    novelId: str = Form(..., description="小说 ID（也就是 threadId）"),
+    inspirationId: str = Form(..., description="要改的那条灵感的行 id"),
+    category: list[str] | None = Form(None, description="新的内容类型（可多值）；不传不改"),
+    usage: str = Form("", description="使用策略：must/selectable/never；不传不改"),
+):
+    """改一条灵感的类型 / 使用策略（卡片上就地改）。内容与翻译结果一概不碰，生命周期固定、改不了。"""
+    sets: list[str] = []
+    params: list = []
+    if category is not None:
+        sets.append("category = %s")
+        params.append(_clean_categories(category))
+    if usage:
+        sets.append("usage = %s")
+        params.append(_clean_usage(usage))
+    if not sets:
+        raise HTTPException(status_code=400, detail="没有要改的字段")
+    sets.append('"updatedAt" = now()')
+    params.extend([inspirationId, novelId])
+
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, novelId, request.state.user_id)
+        cur = await conn.execute(
+            f'UPDATE novel_inspiration SET {", ".join(sets)} '
+            'WHERE id = %s AND "novelId" = %s RETURNING id, category, usage, lifecycle',
+            tuple(params),
+        )
+        row = await cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="灵感不存在")
+    return {"id": row[0], "category": row[1], "usage": row[2], "lifecycle": row[3]}
+
+
+@router.delete("/inspiration")
+async def delete_inspiration(
+    request: Request,
+    novelId: str = Query(..., description="小说 ID（也就是 threadId）"),
+    inspirationId: list[str] = Query(..., description="要删的行 id（可多条，同一份素材一起删）"),
+):
+    """删一份素材产出的灵感（一条或多条）。usedChapterIds 只是 id 列表，没有外键，删掉这些不影响章节。"""
+    ids = [i for i in inspirationId if i]
+    if not ids:
+        raise HTTPException(status_code=400, detail="缺少灵感 id")
+    async with pg_pool.connection() as conn:
+        await _require_novel(conn, novelId, request.state.user_id)
+        cur = await conn.execute(
+            'DELETE FROM novel_inspiration WHERE id = ANY(%s) AND "novelId" = %s RETURNING id',
+            (ids, novelId),
+        )
+        deleted = [row[0] for row in await cur.fetchall()]
+    return {"deleted": deleted}

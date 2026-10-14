@@ -37,3 +37,6 @@ class SetupState(TypedDict, total=False):
     next_hint: str      # 详细建议文本
     # maintain 解析的用户本轮选择摘要（用于 discuss 生成问题时参考）
     user_choice: str
+    # discuss 这一轮实际问的是哪一项（字段名，空串表示六项已齐、用户在提修改意见）。
+    # maintain 用它给提取模型定上下文锚点，也在"上轮编号歧义"时把话题拉回这一项重问。
+    asked_field: str

@@ -5,7 +5,7 @@
 """
 
 NOVEL_SQL = (
-    'SELECT id, title, "wordCount", tropes, style FROM novel '
+    'SELECT id, title, "wordCount", tropes, style, "reviewEnabled" FROM novel '
     'WHERE id = %s AND "userId" = %s'
 )
 
@@ -23,6 +23,7 @@ def empty_novel() -> dict:
         "novel_word_count": 0,
         "novel_tropes": "",
         "novel_style": "",
+        "novel_review_enabled": True,
         "novel_outlines": [],
         "novel_world_rules": [],
         "novel_protagonists": [],
@@ -83,7 +84,7 @@ async def get_novel_meta(novel_id, user_id) -> dict:
         if novel_row is None:
             return novel
 
-        novel_id, title, word_count, tropes, style = novel_row
+        novel_id, title, word_count, tropes, style, review_enabled = novel_row
 
         cur = await conn.execute(PROTAGONIST_SQL, (novel_id, "主角"))
         protagonists = [_character_payload(r) for r in await cur.fetchall()]
@@ -95,6 +96,7 @@ async def get_novel_meta(novel_id, user_id) -> dict:
             "novel_word_count": word_count,
             "novel_tropes": tropes or "",
             "novel_style": style or "",
+            "novel_review_enabled": True if review_enabled is None else bool(review_enabled),
             "novel_protagonists": protagonists,
             "fromDB": True,
         }
@@ -121,9 +123,10 @@ CHARACTER_INSERT = (
 )
 
 # 大纲的生效章节收集阶段用不上，留空表示整本通用；order 先占 0，将来排多卷再改。
+# level 写死 main：开书收的这条就是全书主线，阶段线/支线由 writer 写到那儿时才在台账里报。
 OUTLINE_INSERT = (
-    'INSERT INTO novel_outline (id, "novelId", status, "order", content, "createdAt", "updatedAt") '
-    "VALUES (%s, %s, %s, %s, %s, now(), now())"
+    'INSERT INTO novel_outline (id, "novelId", level, status, "order", content, "createdAt", "updatedAt") '
+    "VALUES (%s, %s, %s, %s, %s, %s, now(), now())"
 )
 
 WORLD_RULE_INSERT = (
@@ -193,6 +196,7 @@ async def save_novel_meta(novel_id: str, user_id: str, novel: dict) -> None:
                         (
                             uuid.uuid4().hex,
                             novel_id,
+                            "main",
                             SETTING_STATUS,
                             order,
                             outline.get("content") or "",

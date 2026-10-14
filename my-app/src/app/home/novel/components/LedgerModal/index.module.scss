@@ -74,6 +74,39 @@
   &::-webkit-scrollbar { display: none; }
 }
 
+.groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.groupHead {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.groupName {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.groupCount {
+  padding: 0 0.375rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+}
+
 .list {
   list-style: none;
   display: flex;
@@ -83,7 +116,7 @@
 
 .item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.5rem;
   padding: 0.5rem 0.625rem;
   border: 1px solid var(--color-border);
@@ -93,28 +126,20 @@
 
 .itemIcon {
   flex-shrink: 0;
+  margin-top: 0.125rem;
   font-size: 0.8125rem;
   color: var(--color-primary);
 }
 
+/* 名字本身就是内容（大纲 / 伏笔这类），整段换行铺满，不做省略 */
 .name {
   flex: 1;
   min-width: 0;
   font-size: 0.8125rem;
-  color: var(--color-text);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.type {
-  flex-shrink: 0;
-  padding: 0 0.375rem;
-  border-radius: 999px;
-  font-size: 0.6875rem;
   line-height: 1.6;
-  background: var(--color-primary-bg);
-  color: var(--color-primary);
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .role {

@@ -38,13 +38,15 @@ model UserActivityLog {
 }
 
 model Session {
-  id        String   @id @default(cuid())
-  expiresAt DateTime @db.Timestamptz(3)
-  token     String   @unique
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt DateTime @updatedAt @db.Timestamptz(3)
-  ipAddress String?
-  userAgent String?
+  id            String     @id @default(cuid())
+  expiresAt     DateTime   @db.Timestamptz(3)
+  token         String     @unique
+  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime   @updatedAt @db.Timestamptz(3)
+  ipAddress     String?
+  userAgent     String?
+  revokedReason String?
+  revokedAt     DateTime?  @db.Timestamptz(3)
 
   userId String
   user   User   @relation(references: [id], fields: [userId], onDelete: Cascade)

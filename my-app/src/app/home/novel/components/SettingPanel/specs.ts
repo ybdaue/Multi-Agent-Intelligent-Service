@@ -32,15 +32,13 @@ function head(value: unknown, limit = 24) {
   return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
 }
 
-const contains = (value: unknown) => (Array.isArray(value) ? value : []);
-const plural = (value: unknown, unit: string) => {
-  const list = contains(value);
-  return list.length ? `${list.length} ${unit}` : "";
-};
-
 /** 设定行上的 status 存的是枚举裸值，摆给用户看要翻成中文；认不出的原样给出去 */
 const STATUS_LABELS: Record<string, string> = { draft: "草稿", done: "定稿" };
 const status = (value: unknown) => STATUS_LABELS[text(value)] ?? text(value);
+
+/** 大纲的分级裸值：主线 / 阶段线 / 支线（旧行没标 level 的一律是主线）。 */
+const LINE_LEVEL_LABELS: Record<string, string> = { main: "主线", phase: "阶段线", branch: "支线" };
+const lineLevel = (value: unknown) => LINE_LEVEL_LABELS[text(value)] ?? text(value);
 
 /**
  * 各标签页的读法。键是 WorkTab，只列在库里真有表的那几个：
@@ -52,6 +50,7 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
     listKey: "outlines",
     title: (row) => head(row.content) || "大纲",
     fields: [
+      { key: "level", label: "分级", format: lineLevel },
       { key: "status", label: "状态", format: status },
       { key: "content", label: "内容", block: true },
     ],
@@ -131,6 +130,18 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
     ],
     empty: "这本书还没有物品设定",
   },
+  foreshadowing: {
+    endpoint: "foreshadowings",
+    listKey: "foreshadowings",
+    title: (row) => head(row.description) || "伏笔",
+    fields: [
+      { key: "status", label: "状态", format: status },
+      { key: "plantedChapter", label: "埋设章节" },
+      { key: "resolvedChapter", label: "回收章节" },
+      { key: "description", label: "描述", block: true },
+    ],
+    empty: "这本书还没有伏笔",
+  },
   relations: {
     endpoint: "relations",
     listKey: "relations",
@@ -142,15 +153,5 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
       { key: "description", label: "描述", block: true },
     ],
     empty: "这本书还没有人物关系",
-  },
-  inspiration: {
-    endpoint: "inspirations",
-    listKey: "inspirations",
-    title: (row) => text(row.type) || "灵感",
-    fields: [
-      { key: "usedChapterIds", label: "已用章节", format: (value) => plural(value, "章") },
-      { key: "content", label: "内容", block: true },
-    ],
-    empty: "这本书还没有灵感",
   },
 };

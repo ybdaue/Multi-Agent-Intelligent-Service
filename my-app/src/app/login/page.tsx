@@ -52,6 +52,7 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [reasonOverlay, setReasonOverlay] = useState<string | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
 
   // 错误提示 2 秒后自动消失
@@ -71,6 +72,14 @@ export default function Login() {
       if (data?.session) redirectAfterLogin();
     }).catch(() => {});
   }, []);
+
+  // 从 URL 读取 reason 参数（被踢/封禁/过期），弹遮罩提示
+  useEffect(() => {
+    const reason = new URLSearchParams(window.location.search).get("reason")
+    if (reason) {
+      setReasonOverlay(decodeURIComponent(reason))
+    }
+  }, [])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -100,7 +109,8 @@ export default function Login() {
   }
 
   return (
-    <div className={styles.page}>
+    <>
+      <div className={styles.page}>
       <div className={styles.bgGradient} />
       <div className={styles.bgGrid} />
       <div className={styles.bgRing} />
@@ -218,5 +228,27 @@ export default function Login() {
         </div>
         <div className={styles.exitOverlay} />
       </div>
+
+      {reasonOverlay && (
+        <div className={styles.reasonOverlay}>
+          <div className={styles.reasonCard}>
+            <div className={styles.reasonIcon}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+            </div>
+            <p className={styles.reasonTitle}>提示</p>
+            <p className={styles.reasonText}>{reasonOverlay}</p>
+            <button
+              className={styles.reasonButton}
+              onClick={() => {
+                setReasonOverlay(null)
+                window.history.replaceState(null, "", "/login")
+              }}
+            >确定</button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

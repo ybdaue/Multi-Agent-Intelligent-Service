@@ -35,3 +35,13 @@ agents-project/models/
 
 # 数据集（agents-project/.gitignore 已覆盖，此处兜底防止根目录误提交）
 agents-project/laws/
+
+# Public assets (根目录 public 文件夹, 不上传)
+public/
+
+# HTTPS 证书压缩包
+*.zip
+
+# 本地开发文档 (不上传)
+NOVEL_ARCHITECTURE.md
+NOVEL_EDIT_ARCHITECTURE.md

@@ -22,6 +22,7 @@ const ALLOWED = new Set([
   "factions",
   "chronicles",
   "items",
+  "foreshadowings",
   "relations",
   "inspirations",
 ]);

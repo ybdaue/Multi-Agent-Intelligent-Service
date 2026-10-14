@@ -25,21 +25,17 @@ async function readBackendError(res: Response): Promise<string> {
  * path 是后端完整路径（`/api/novel/agent/run`、`/api/novel/setup/resume` …）—— 写章与开书
  * 两个 agent 挂在同一个大入口下面各占一段，事件协议一致，转发逻辑就这一份。
  *
- * files 是用户挂上来的附件，按同名多次追加（写章那一轮才有，其余调用方不传）。
  * timeout: 0 不能省：写章那一轮要等 writer 写完、reader 审完才停，默认超时会把长流掐断。
  */
 export async function forwardNovelStream(
   auth: AuthContext,
   path: string,
   fields: Record<string, string>,
-  files?: File[],
 ): Promise<Response> {
   const backendForm = new FormData();
   for (const [key, value] of Object.entries(fields)) {
     if (value) backendForm.append(key, value);
   }
-  // 附件按同名多次追加：后端收的是 UploadFile 列表，顺序与 fields 里那份元信息一一对应。
-  for (const file of files ?? []) backendForm.append("files", file);
 
   let backendRes: Response;
   try {

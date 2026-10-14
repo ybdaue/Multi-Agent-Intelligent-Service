@@ -84,7 +84,7 @@ export async function fetchNovelJSON<T>(url: string): Promise<T> {
  */
 export async function mutateNovel<T = unknown>(
   url: string,
-  options: RequestInit,
+  options: RequestInit & { timeout?: number },
 ): Promise<T> {
   const res = await request(url, options);
   if (!res.ok) {

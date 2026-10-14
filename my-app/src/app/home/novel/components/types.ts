@@ -48,6 +48,8 @@ export interface Novel {
   wordCount: number;
   tropes: string;
   style: string;
+  /** AI 审稿开关：关掉后写/改完直接进确认，不走 reader */
+  reviewEnabled: boolean;
   chapters: Chapter[];
 }
 
@@ -63,8 +65,75 @@ export interface RunChapter {
 
 export type MessageRole = "user" | "assistant";
 
-/** 灵感素材：图片/文件取 File，链接取 url */
-export type InspirationKind = "image" | "file" | "url";
+/** 素材形态：图片/文件取 File，链接取 url，文本取输入的文字 */
+export type InspirationKind = "image" | "file" | "url" | "text";
+
+/** 灵感的内容类型（库里 novel_inspiration.category）。取值与后端 method.py 的 INSPIRATION_CATEGORIES 对齐。 */
+export type InspirationCategory =
+  | "style"
+  | "plot"
+  | "character"
+  | "meme"
+  | "setting"
+  | "scene"
+  | "dialogue"
+  | "imagery"
+  | "emotion"
+  | "technique"
+  | "other";
+
+/** 取值、下拉里的顺序、给用户看的字，三处一份，别各写各的 */
+export const INSPIRATION_CATEGORY_OPTIONS: { value: InspirationCategory; label: string }[] = [
+  { value: "style", label: "风格" },
+  { value: "plot", label: "剧情" },
+  { value: "character", label: "人物" },
+  { value: "meme", label: "热梗" },
+  { value: "setting", label: "设定" },
+  { value: "scene", label: "场景" },
+  { value: "dialogue", label: "对话" },
+  { value: "imagery", label: "意象" },
+  { value: "emotion", label: "情感" },
+  { value: "technique", label: "写作技巧" },
+  { value: "other", label: "其他" },
+];
+
+export const INSPIRATION_CATEGORY_LABEL: Record<InspirationCategory, string> = {
+  style: "风格",
+  plot: "剧情",
+  character: "人物",
+  meme: "热梗",
+  setting: "设定",
+  scene: "场景",
+  dialogue: "对话",
+  imagery: "意象",
+  emotion: "情感",
+  technique: "写作技巧",
+  other: "其他",
+};
+
+/** 使用策略（库里 novel_inspiration.usage）：必用每章带上，选用供挑选，不用直接排除。 */
+export type InspirationUsage = "must" | "selectable" | "never";
+
+export const INSPIRATION_USAGE_OPTIONS: { value: InspirationUsage; label: string }[] = [
+  { value: "must", label: "必用" },
+  { value: "selectable", label: "选用" },
+  { value: "never", label: "不用" },
+];
+
+export const INSPIRATION_USAGE_LABEL: Record<InspirationUsage, string> = {
+  must: "必用",
+  selectable: "选用",
+  never: "不用",
+};
+
+/** 生命周期（库里 novel_inspiration.lifecycle）：复用每章可再选，单次用过即退出候选。
+ *  固定值、按分类自动定（剧情/人物/设定单次、其余复用），用户改不了，前端只读展示。 */
+export type InspirationLifecycle = "reuse" | "once";
+
+export const INSPIRATION_LIFECYCLE_LABEL: Record<InspirationLifecycle, string> = {
+  reuse: "复用",
+  once: "单次",
+};
 
 export interface InspirationItem {
   id: string;
@@ -74,7 +143,11 @@ export interface InspirationItem {
   /** 图片的预览地址，FileReader 读出的 data URL（不占 object URL 生命周期） */
   preview?: string;
   url?: string;
+  /** 文本灵感的内容（kind === "text" 时用） */
+  text?: string;
   size?: number;
+  /** 对话里从灵感库挑中的那条的库内 id（普通上传件没有） */
+  inspirationId?: string;
 }
 
 export interface Message {
@@ -94,6 +167,7 @@ export type WorkTab =
   | "factions"
   | "chronicle"
   | "items"
+  | "foreshadowing"
   | "relations"
   | "inspiration"
   | "export"

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { auth } from "@/lib/auth"
+import prisma from "@/lib/prisma"
 
 const API_AUTH_PREFIX = "/api/auth"
 
@@ -12,6 +13,25 @@ const SESSION_COOKIE_NAMES = [
   "__Secure-better-auth.session_token",
   "better-auth.session_token",
 ]
+
+/** 从 request cookie 中提取原始 session token */
+function getTokenFromRequest(request: NextRequest): string | null {
+  for (const name of SESSION_COOKIE_NAMES) {
+    const val = request.cookies.get(name)?.value
+    if (val) return val.split(".")[0]
+  }
+  return null
+}
+
+/** 创建重定向响应，同时清除旧 session cookie 防止重定向循环 */
+function redirectToLogin(request: NextRequest, reason: string): NextResponse {
+  const url = new URL(`/login?reason=${encodeURIComponent(reason)}`, request.url)
+  const response = NextResponse.redirect(url)
+  for (const name of SESSION_COOKIE_NAMES) {
+    response.cookies.set(name, "", { maxAge: 0, path: "/" })
+  }
+  return response
+}
 
 function extendSessionCookie(request: NextRequest, response: NextResponse) {
   for (const name of SESSION_COOKIE_NAMES) {
@@ -36,8 +56,19 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next()
   }
 
+  // 先查 DB 预检 session 是否已被撤销或过期
+  const token = getTokenFromRequest(request)
+  if (token) {
+    const dbSession = await prisma.session.findUnique({ where: { token } })
+    if (dbSession?.revokedReason) {
+      return redirectToLogin(request, dbSession.revokedReason)
+    }
+    if (dbSession && dbSession.expiresAt < new Date()) {
+      return redirectToLogin(request, "登录已过期，请重新登录")
+    }
+  }
+
   try {
-    // 直接读取 cookie 校验 session，避免每次请求多做一次内部 HTTP 往返
     const session = await auth.api.getSession({ headers: request.headers })
 
     if (pathname === "/login") {

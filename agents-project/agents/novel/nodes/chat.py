@@ -14,6 +14,8 @@ from langgraph.graph.message import add_messages
 from ..state import State
 from ..tools import fetchDB
 from ..utils import _chatModel_backup, CHAT_PROMPT, chatModel, recent_history
+from .utils.config import tool_config
+from .utils.reply import last_reply
 
 
 class ChatState(TypedDict):
@@ -35,16 +37,6 @@ _chat_agent_backup = create_agent(
     system_prompt=CHAT_PROMPT,
     state_schema=ChatState,
 )
-
-
-def _last_reply(messages) -> str:
-    """最后一条没有工具调用的助手回复 —— 答完交回父图的就是它。"""
-    for message in reversed(messages or ()):
-        if isinstance(message, AIMessage) and not getattr(message, "tool_calls", None):
-            content = message.content
-            if isinstance(content, str) and content.strip():
-                return content
-    return ""
 
 
 def _context(state: State) -> str:
@@ -70,34 +62,23 @@ def _context(state: State) -> str:
 
 async def chat(state: State, config: RunnableConfig):
     """答用户这一句。挂 fetchDB，库里已落库的东西能查到，不再只靠对话历史猜。"""
-    cfg = (config or {}).get("configurable") or {}
-    # config 只挑这两个键递给子图：fetchDB 要拿 novel_id，多带的 thread_id / checkpoint_ns
-    # 会给这个没有 checkpointer 的子图种出一份自己的 checkpoint（写章那条子图是挂成节点、
-    # 由引擎喂 config，这份是手调，得自己裁）。
+    # config 裁成只带 novel_id / user_id（fetchDB 要拿 novel_id；多带的 thread_id / checkpoint_ns
+    # 会给这个没有 checkpointer 的子图种出一份自己的 checkpoint —— 见 nodes/utils/config.py）。
+    tool_cfg = tool_config(config)
     try:
         result = await _chat_agent.ainvoke(
             {"messages": [HumanMessage(content=_context(state))]},
-            config={
-                "configurable": {
-                    "novel_id": str(cfg.get("novel_id") or ""),
-                    "user_id": str(cfg.get("user_id") or ""),
-                }
-            },
+            config=tool_cfg,
         )
     except Exception:
         print("[chat] 主闲聊 agent 失败，尝试备用")
         try:
             result = await _chat_agent_backup.ainvoke(
                 {"messages": [HumanMessage(content=_context(state))]},
-                config={
-                    "configurable": {
-                        "novel_id": str(cfg.get("novel_id") or ""),
-                        "user_id": str(cfg.get("user_id") or ""),
-                    }
-                },
+                config=tool_cfg,
             )
         except Exception:
             return {}
-    reply = _last_reply(result.get("messages"))
+    reply = last_reply(result.get("messages"))
     # 一个字都没答出来就什么都别往 messages 里塞（空回复会被历史口径滤掉，塞了也没意义）。
     return {"messages": [AIMessage(content=reply)]} if reply else {}

@@ -23,7 +23,7 @@ function unavailable(err: unknown) {
 }
 
 /**
- * 改书名 / 类型 / 文风。只改传上来的那几项，没传的后端原样留着。
+ * 改书名 / 类型 / 文风 / AI 审稿开关。只改传上来的那几项，没传的后端原样留着。
  *
  * 前端改书名也走这里（原来的 POST 还留着，是给没跟上的调用方的一个旧口子）。
  */
@@ -40,11 +40,11 @@ export const PATCH = withAuth(async (auth, req) => {
 
   const backendForm = new FormData();
   backendForm.append("novelId", novelId);
-  for (const field of ["title", "tropes", "style"]) {
+  for (const field of ["title", "tropes", "style", "reviewEnabled"]) {
     const value = form.get(field);
     if (value !== null) backendForm.append(field, String(value));
   }
-  if (!["title", "tropes", "style"].some((field) => backendForm.has(field))) {
+  if (!["title", "tropes", "style", "reviewEnabled"].some((field) => backendForm.has(field))) {
     return Response.json({ error: "没有要改的内容" }, { status: 400 });
   }
 

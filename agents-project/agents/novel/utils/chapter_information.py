@@ -11,15 +11,19 @@ import json
 import re
 import uuid
 
-from .ledger import CATALOG, CATALOG_SQL, TITLE_LINE, render_catalog, write_ledger
+from .ledger import CATALOG, CATALOG_SQL, TITLE_LINE, render_catalog, write_ledger, write_lines
 
-# 番茄最佳阅读长度，writer 照这个写，save 节点按这个卡。
+# 番茄最佳阅读长度，writer 照这个写，reader 审稿时按这个卡字数。
 CHAPTER_MIN_WORDS = 2200
 CHAPTER_MAX_WORDS = 2800
 
-# 字数上最多写几稿（含第一稿）。reader 审出的硬伤不再设上限：回炉由用户在 confirm_chapter
-# 那儿拍板，收下与否决定了这一轮是否结束，不靠次数兜着 recursion_limit。
-MAX_WRITE_TRIES = 3
+# 一条支线（临时小剧情）最多写几章就必须收尾、收束回主线，防止写手顺着一个剧情一直写。
+# 到点由 planner 用确定的数报给写手（见 nodes/writer/helpers.py 的 _constraint_block），不由模型自己拿捏。
+BRANCH_MAX_CHAPTERS = 3
+
+# 一条阶段线（主线下的一个大阶段）最多写几章就必须收尾、再开下一条阶段线。比支线长，
+# 一条阶段线里约容纳 (PHASE_MAX_CHAPTERS / BRANCH_MAX_CHAPTERS) 条支线。同样由 planner 照硬数报。
+PHASE_MAX_CHAPTERS = 6
 
 # 大纲 / 世界规则塞进 prompt 前的上限，别一条把上下文吃光；上一章正文不设上限（截了等于没读）。
 MAX_OUTLINE_CHARS = 6_000
@@ -27,7 +31,7 @@ MAX_RULE_CHARS = 2_000
 
 NEXT_ORDER_SQL = 'SELECT COALESCE(MAX("order"), 0) + 1 FROM novel_chapter WHERE "novelId" = %s'
 
-# 上一章取正文和 pastSummary，上上一章只要精简 —— 再往前的内容早进了 pastSummary。
+# 上一章取正文、精简和 pastSummary，上上一章只要精简 —— 再往前的内容早进了 pastSummary。
 # 取"严格小于目标序号里最大的两条"，不写死 order-1 / order-2：中间删过章就会有空洞，
 # 写死会让 prev_content 落空，模型被告知"这是本书第一章，没有上一章可接"。
 PREV_CHAPTERS_SQL = (
@@ -38,8 +42,10 @@ PREV_CHAPTERS_SQL = (
 # 大纲 / 世界规则用 startChapterId / endChapterId 圈生效区间，两列存的是章节 id，要比就得
 # 解析回 order（调用方给的是"下一章的序号"，那一章还没有 id）。区间为空 = 整本通用；
 # 左连接落空（没设，或指向的章已删）都按「不限」处理，不让一处悬空把整条大纲都挡掉。
+# level 区分主线 / 阶段线 / 支线；parentId 表达包含关系（阶段线挂主线、支线挂阶段线，
+# 主线为空）；start_order 是起始章的序号，阶段线 / 支线靠它算「已经写了几章」。
 OUTLINES_SQL = (
-    "SELECT o.content FROM novel_outline o "
+    'SELECT o.id, o.level, o.content, o."parentId", sc."order" FROM novel_outline o '
     'LEFT JOIN novel_chapter sc ON sc.id = o."startChapterId" '
     'LEFT JOIN novel_chapter ec ON ec.id = o."endChapterId" '
     'WHERE o."novelId" = %s AND (sc."order" IS NULL OR sc."order" <= %s) '
@@ -211,11 +217,15 @@ async def next_chapter_order(novel_id: str) -> int:
 
 
 async def get_writer_context(novel_id: str, order: int | None = None) -> dict:
-    """动笔前要备齐的材料：本章序号、前文三项、本章生效的大纲与世界规则、已有设定目录。
+    """动笔前要备齐的材料：本章序号、前文、本章生效的大纲与世界规则、已有设定目录。
 
     不传 order 就是"下一章"（writer 写新章）；改已有章节传目标序号 —— "上一章"该是它前面
     那一章，大纲与世界规则也要按它当时生效的那几条取。前文没有就是空串 / 空 dict。
-    目录（各给 id 和名字）是给 writer 的台账用的：它得知道"这一章用的是已有的哪一条"。
+    大纲按 level 分成主线段（main_outlines）、阶段线段（phase_lines）、支线段（branch_lines），
+    支线带 start_order，供 planner 算它已经写了几章。阶段线 / 支线各带 parent_id（阶段线挂主线、
+    支线挂阶段线），main_line_id 是主线的 id，供 planner 新开阶段线时挂父。prev_summary 是上一章
+    精简，喂给写手当近章记忆；prev_content 是上一章全文，只留给 reader 核对承接。目录（各给 id
+    和名字）是给 writer 的台账用的：它得知道"这一章用的是已有的哪一条"。
     """
     from api.utils.db import pg_pool
 
@@ -225,18 +235,40 @@ async def get_writer_context(novel_id: str, order: int | None = None) -> dict:
 
         cur = await conn.execute(PREV_CHAPTERS_SQL, (novel_id, order))
         prev_content = ""
+        prev_summary = ""
         prev_prev_summary = ""
         prev_past_summary = {}
         # 按行序认：第一条是上一章，第二条是上上一章（查询已按 order 倒序）。
         for index, (_order, content, summary, past_summary) in enumerate(await cur.fetchall()):
             if index == 0:
                 prev_content = content or ""
+                prev_summary = summary or ""
                 prev_past_summary = past_summary or {}
             else:
                 prev_prev_summary = summary or ""
 
+        # 大纲按 level 拆开：主线当脉，阶段线是这一段主线要推进的方向，支线是当前那个临时小剧情。
+        # parentId 带着包含关系：阶段线挂主线、支线挂阶段线。main_line_id 取第一条主线的 id，
+        # 供 writer 新开阶段线时挂父（setup 收的「核心冲突」暂只一条）。
         cur = await conn.execute(OUTLINES_SQL, (novel_id, order, order))
-        outlines = [_clip(row[0], MAX_OUTLINE_CHARS) for row in await cur.fetchall()]
+        main_outlines = []
+        main_line_id = ""
+        phase_lines = []
+        branch_lines = []
+        for outline_id, level, content, parent_id, start_order in await cur.fetchall():
+            text = _clip(content, MAX_OUTLINE_CHARS)
+            if level == "phase":
+                phase_lines.append(
+                    {"id": outline_id, "content": text, "start_order": start_order, "parent_id": parent_id or ""}
+                )
+            elif level == "branch":
+                branch_lines.append(
+                    {"id": outline_id, "content": text, "start_order": start_order, "parent_id": parent_id or ""}
+                )
+            else:
+                main_outlines.append(text)
+                if not main_line_id:
+                    main_line_id = outline_id
 
         cur = await conn.execute(WORLD_RULES_SQL, (novel_id, order, order))
         world_rules = [
@@ -250,20 +282,25 @@ async def get_writer_context(novel_id: str, order: int | None = None) -> dict:
 
     return {
         "chapter_order": order,
+        # 上一章全文只给 reader 核对承接用；写手看的是 prev_summary（近章摘要）。
         "prev_content": prev_content,
+        "prev_summary": prev_summary,
         "prev_prev_summary": prev_prev_summary,
         "prev_past_summary": prev_past_summary,
-        "outlines": outlines,
+        "main_outlines": main_outlines,
+        "main_line_id": main_line_id,
+        "phase_lines": phase_lines,
+        "branch_lines": branch_lines,
         "world_rules": world_rules,
         "catalog": catalog,
     }
 
 
 async def upsert_chapter(novel_id: str, chapter: dict) -> tuple[str, int]:
-    """把一章写进 novel_chapter，顺带刷新全书总字数、落这一章的台账。
+    """把一章写进 novel_chapter，顺带刷新全书总字数、落这一章的台账（关联 + 阶段线/支线）。
 
     入参是 ChapterMeta 那份 dict，字数落库前调用方要自己算好。
-    三笔同一事务：总字数没跟上前端就对不上，台账没跟上将来改设定就查不出这一章用了什么；
+    四笔同一事务：总字数没跟上前端就对不上，台账没跟上将来改设定就查不出这一章用了什么；
     台账要 chapter_id，所以排在章节插入之后。
 
     已存在的章不会被改标题（见 UPSERT_SQL 上面那段）：用户改过的章名以库里那份为准。
@@ -296,6 +333,14 @@ async def upsert_chapter(novel_id: str, chapter: dict) -> tuple[str, int]:
                 chapter_id,
                 chapter.get("chapter_refs"),
                 chapter.get("chapter_new"),
+            )
+
+            await write_lines(
+                conn,
+                novel_id,
+                chapter_id,
+                chapter.get("chapter_order") or 0,
+                chapter.get("chapter_lines"),
             )
 
             cur = await conn.execute(NOVEL_WORD_COUNT_SQL, (novel_id, novel_id))

@@ -57,7 +57,7 @@ services:
       - "3000:3000"
     environment:
       - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/demo
-      - NEXT_PUBLIC_BETTER_AUTH_URL=http://${SERVER_IP:-localhost}:3000
+      - NEXT_PUBLIC_BETTER_AUTH_URL=https://www.daueagent.cn
       - NEXT_PUBLIC_API_URL=http://agents-api:8080
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - TICKFLOW_KEY=${TICKFLOW_KEY}

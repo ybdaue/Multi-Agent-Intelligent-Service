@@ -208,7 +208,6 @@ export function useNovelAgent(base: "agent" | "setup" = "agent") {
       action: "run" | "resume",
       fields: Record<string, string>,
       handlers: NovelAgentHandlers,
-      files?: File[],
     ) => {
       // 上一轮还没收尾就别开新的（同一 thread 上并发跑两轮会把图搅乱）
       if (abortRef.current) return;
@@ -221,8 +220,6 @@ export function useNovelAgent(base: "agent" | "setup" = "agent") {
         for (const [key, value] of Object.entries(fields)) {
           if (value) form.append(key, value);
         }
-        // 用户挂上来的附件：同名多次追加，与 fields 里那份元信息同序对应
-        for (const file of files ?? []) form.append("files", file);
 
         const res = await fetch(`/api/novel/${base}/${action}`, {
           method: "POST",
@@ -303,9 +300,9 @@ export function useNovelAgent(base: "agent" | "setup" = "agent") {
   /**
    * 开一轮：一句话交给图（写新章 / 改这一章 / 闲聊；开书则是那句话开场白）。
    *
-   * attachments 是用户挂上来的素材：文件本体走 files 上传，另一份只有字符串字段的元信息进
-   * inspirations（顺序一一对应）—— 后端据它把内容和名字配回去，并整份落 novel_inspiration。
-   * 没有附件就一个字段都不带，后端按空素材处理。
+   * attachments 是用户在对话框里从灵感库挑的灵感：只把它们在库里的 id 打包发过去
+   * （inspirationIds），后端按 id 取回完整行进图 —— **只取不落库**，灵感在灵感库那边入库。
+   * 没挑就是空字段，后端按"本轮没用灵感"处理。
    */
   const run = useCallback(
     (
@@ -315,18 +312,9 @@ export function useNovelAgent(base: "agent" | "setup" = "agent") {
       handlers: NovelAgentHandlers,
       attachments?: InspirationItem[],
     ) => {
-      const files = (attachments ?? []).flatMap((a) => (a.file ? [a.file] : []));
-      const inspirations = attachments?.length
-        ? JSON.stringify(
-            attachments.map((a) => ({
-              kind: a.kind,
-              name: a.name,
-              url: a.url ?? "",
-              hasFile: Boolean(a.file),
-            })),
-          )
-        : "";
-      return send("run", { novelId, text, chapterId, inspirations }, handlers, files);
+      const ids = (attachments ?? []).flatMap((a) => (a.inspirationId ? [a.inspirationId] : []));
+      const inspirationIds = ids.length ? JSON.stringify(ids) : "";
+      return send("run", { novelId, text, chapterId, inspirationIds }, handlers);
     },
     [send],
   );

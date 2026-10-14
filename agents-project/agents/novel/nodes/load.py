@@ -19,7 +19,13 @@ async def load(state: State, store: BaseStore, config: RunnableConfig) -> dict:
     """
     cfg = config["configurable"]
     novel = await get_novel_meta(cfg.get("novel_id"), str(cfg.get("user_id") or "0"))
+    # 审稿开关随小说带进 state：writer/editor 之后据此决定去 reader 还是直接到 confirm_chapter。
+    review_enabled = bool(novel.get("novel_review_enabled", True))
     if not novel.get("fromDB"):
         # 开书只走弹窗里那个独立图（agents/novel/setup），这里没得问，直接给出去哪儿建。
-        return {"novel": novel, "edit_note": "这本书还没有设定，先去左侧「新建小说」建一本，再回来写。"}
-    return {"novel": novel}
+        return {
+            "novel": novel,
+            "review_enabled": review_enabled,
+            "edit_note": "这本书还没有设定，先去左侧「新建小说」建一本，再回来写。",
+        }
+    return {"novel": novel, "review_enabled": review_enabled}

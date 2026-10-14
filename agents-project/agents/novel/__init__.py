@@ -81,7 +81,14 @@ async def summarize_chapter(state: State, config: RunnableConfig) -> dict:
     return {}
 
 
-from .utils import classify,route_after_chat,route_after_load,route_after_resolve,traced
+from .utils import (
+    classify,
+    route_after_chat,
+    route_after_draft,
+    route_after_load,
+    route_after_resolve,
+    traced,
+)
 
 novel_workflow = StateGraph(state_schema=State)
 checkpointer = create_checkpoint("novel_agent")
@@ -92,7 +99,7 @@ from .nodes import intension,writer,editor,confirm_chapter,reader,chat,load,reso
 
 # traced 只是给调式看的进出打印（agents/novel/utils/trace.py），不影响 state 与控制流。
 # writer / editor / reader 是编译好的子图、节点函数就是子图本身，挂不上这一层 ——
-# 它们的执行流程看子图内部那几个节点（writer.prepare、editor.settle 这类）。
+# 它们的执行流程看子图内部那几个节点（writer.planner、editor.settle 这类）。
 novel_workflow.add_node("intension",traced("intension")(intension))
 # 闲聊
 novel_workflow.add_node("chat",traced("chat")(chat))
@@ -147,8 +154,23 @@ novel_workflow.add_conditional_edges(
         "edit":"editor",
     },
 )
-novel_workflow.add_edge("writer","reader")
-novel_workflow.add_edge("editor","reader")
+# 一稿写完 / 改完：审稿开着去 reader 查一遍，关着直接去 confirm_chapter（见 utils/classify.route_after_draft）。
+novel_workflow.add_conditional_edges(
+    "writer",
+    route_after_draft,
+    {
+        "reader":"reader",
+        "confirm_chapter":"confirm_chapter",
+    },
+)
+novel_workflow.add_conditional_edges(
+    "editor",
+    route_after_draft,
+    {
+        "reader":"reader",
+        "confirm_chapter":"confirm_chapter",
+    },
+)
 # 审完不再自己判去路：一律停下来问用户，去哪儿由 confirm_chapter 的 Command 定。
 novel_workflow.add_edge("reader","confirm_chapter")
 # 闲聊不一定就收尾：用户没点确认按钮、而是问了一句时，这一轮是"先答他"，答完还得回去

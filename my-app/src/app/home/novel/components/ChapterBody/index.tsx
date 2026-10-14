@@ -19,6 +19,8 @@ interface ChapterBodyProps {
   onChangeStatus: (status: ChapterStatus) => void;
   messages: Message[];
   onSend: (text: string, attachments: InspirationItem[]) => void;
+  /** 这本书的 id（= threadId）：透给 AiPanel，从灵感库挑灵感时要用 */
+  threadId: string | null;
   /** 正在流式生成的那一稿；非空时正文区换成一个临时框，盖住这一章原有的内容 */
   draft: { content: string; streaming: boolean } | null;
   stage: string;
@@ -35,6 +37,9 @@ interface ChapterBodyProps {
   onClear: () => void;
   /** 本轮正在生成的那一章；和当前章是同一章时由标题旁那个徽章自己标 */
   runChapter: RunChapter | null;
+  /** 这本书的 AI 审稿开关（挂在右侧对话面板顶部） */
+  reviewEnabled: boolean;
+  onToggleReview: (on: boolean) => void;
 }
 
 export default function ChapterBody({
@@ -43,6 +48,7 @@ export default function ChapterBody({
   onChangeStatus,
   messages,
   onSend,
+  threadId,
   draft,
   stage,
   chatDisabled,
@@ -53,6 +59,8 @@ export default function ChapterBody({
   onAnswer,
   onClear,
   runChapter,
+  reviewEnabled,
+  onToggleReview,
 }: ChapterBodyProps) {
   // 定稿了才只读；草稿与待修复都要能直接改正文
   const done = chapter.status === "done";
@@ -64,15 +72,17 @@ export default function ChapterBody({
   // 本轮写在别的章上：那一章照常在写，这一章该显示什么显示什么，只在标题栏右边挂一句提示
   const runningElsewhere = runChapter && runChapter.id !== chapter.id ? runChapter : null;
 
-  // 流式正文越写越长，跟着滚到底
+  // 流式正文越写越长，跟着滚到底；切到正在生成的章时也滚到底
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [draft?.content]);
+  }, [draft?.content, chapter.id]);
 
   return (
     <div className={styles.body}>
-      <div className={styles.textPanel}>
+      {/* 按章节 key 重挂载：切章时正文滚动条回到最顶上（复用 DOM 会让位置留着）。
+          旁边的 AiPanel 也用 chapter.id 当 key，两兄弟撞 key，所以这里加前缀错开。 */}
+      <div key={`text-${chapter.id}`} className={styles.textPanel}>
         <div className={styles.textHeader}>
           <span className={styles.title}>{chapter.title}</span>
           {draft ? (
@@ -131,6 +141,7 @@ export default function ChapterBody({
         key={chapter.id}
         messages={messages}
         onSend={onSend}
+        threadId={threadId}
         stage={stage}
         disabled={chatDisabled}
         running={running}
@@ -139,6 +150,8 @@ export default function ChapterBody({
         answerOptions={answerOptions}
         onAnswer={onAnswer}
         onClear={onClear}
+        reviewEnabled={reviewEnabled}
+        onToggleReview={onToggleReview}
       />
     </div>
   );

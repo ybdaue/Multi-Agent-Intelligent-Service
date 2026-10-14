@@ -17,7 +17,7 @@ from ..utils import (
     render_history,
     split_for_compact,
 )
-from ..utils.retry import with_retry_and_fallback
+from .utils.retry import with_retry_and_fallback
 
 
 async def _compact_node(state: State) -> dict:

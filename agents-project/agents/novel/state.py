@@ -13,6 +13,7 @@ class NovelMeta(TypedDict):
     novel_word_count: int
     novel_tropes: str                    #小说套路
     novel_style: str                     #小说风格
+    novel_review_enabled: bool           #是否开启 AI 审稿（reader 节点），关掉后写/改完直接到确认
     novel_outlines: List[dict]           #核心冲突（落 novel_outline 表，暂只一条）
     novel_world_rules: List[dict]        #世界观、等级/力量体系（落 novel_world_rule 表）
     novel_protagonists: List[dict]       #主角：人设、金手指、反差点
@@ -35,6 +36,10 @@ class ChapterMeta(TypedDict):
     # None = 这一稿没给台账（旧的关联一行不动）；[] = 明确说不涉及，换掉旧的。
     chapter_refs: Optional[List[dict]]   #本章用到的已有设定：[{refType, refId, role}]，落 novel_chapter_ref
     chapter_new: List[dict]              #本章新造的设定：[{refType, fields}]，先落各表再挂一条 ref
+    # 本章所处的阶段线 / 支线：[{level, id, action, content, parentId}]，level 是 phase / branch。
+    # open 时 id 是代码预生成的新 id、parentId 挂父（阶段线→主线、支线→阶段线）；continue/close
+    # 照抄目标 id。由 update 写进 novel_outline；writer 没报就是 []。
+    chapter_lines: List[dict]
 
 
 class ChapterTarget(TypedDict):
@@ -94,6 +99,8 @@ class ChangeImpact(TypedDict):
     只是"可能受影响"的候选，不是结论；severity 是启发式初值（见 utils/impact.py）。
     status / resolution 只有 reader 那条路给：那是用户当场点了「保留」才记下的行，
     落库就是 skipped（不是待处理的 pending），resolution 写清他做了什么决定。
+    reader 审出的问题也走这一条：detectedBy="reader"，用户收下有问题的稿记 pending，
+    重写后审过则同一批行翻成 fixed（见 nodes/reader.py 的 save）。
     """
 
     changeId: str
@@ -128,13 +135,19 @@ class State(MessagesState):
     # 早先几轮压成的一段话（口径见 utils/history.py），和 messages 里最近几条一起喂给模型。
     chat_summary: str = ""
 
-    # 这一轮用户挂上来的素材（图片 / 文件 / 链接），已由 /run 落 novel_inspiration 并带回 id。
-    # 每条 {id, type, name, content}：type 是 image / file / url，content 是能读出来的文字
-    # （图片这类读不了的给一句说明）。update 落章后往 usedChapterIds 里补这一章，然后清空。
+    # 这一轮用户在对话框里从灵感库挑中的灵感（/run 按 id 取回，完整行，带真 id）。
+    # 每条 {id, title, category, type, content, usage, lifecycle, scenario, digest, usedChapterIds}：
+    # 只取不落库 —— 灵感入库在灵感库那边做，这里只是点名用哪几条，落章后据此补 usedChapterIds。
     inspirations: List[dict]
+    # 本章**最终选用**的灵感（planner 定：forced 必用 ∪ 本轮点名的那几条），带 how。
+    # writer 照它的写作指引落笔，reader.style 逐条校验用没用上，update 落章后清空。
+    chapter_inspirations: List[dict]
 
     # ===== 小说信息 =====
     novel: NovelMeta
+    # 是否走 reader 审稿：load 时按 novel_review_enabled 读进 state，writer/editor 之后据此路由 ——
+    # 关掉就直接去 confirm_chapter，用户确认后落库（见 __init__ 的条件边与 utils/classify）。
+    review_enabled: bool = True
     # resolve 节点查好的上下文（前文、大纲、世界规则、设定目录），writer/reader 复用跳过重复查库
     writer_context: dict
     active_chapter: ChapterMeta
