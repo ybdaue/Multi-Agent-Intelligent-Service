@@ -10,17 +10,23 @@ def classify(state: State) -> str:
 
 
 def route_after_chat(state: State) -> str:
-    """闲聊之后：手上还压着一份没确认的稿，就转回确认那一问；否则照旧收尾。
+    """闲聊之后：手上还压着一份没确认的稿，就转回确认那一问；否则收尾。
 
     从 confirm_chapter 转过来的闲聊是"用户没点按钮、而是问了一句"：他要的答复由 chat 给
     （问答在 messages 末尾），这一稿仍在 active_chapter 里等着 —— 不能让 chat 顺手走到
     update，那是把他没确认的稿落库了。判据跟 reader.gather / confirm_chapter / update
     同一个口径：正文非空、chapter_id 为空 = 这一稿还没落库。
+
+    没有待确认的稿就直接去 compact 收尾，**不走 update / summarize_chapter**：闲聊只答话
+    （挂 fetchDB 查库告诉用户想知道的），库里的东西一个字都不该动。那两笔都是写库的 ——
+    update 会把 state 里残留的设定改动 / 影响台账写进库；summarize_chapter 看着
+    active_chapter 里那个跨轮留着的 chapter_id（上一轮写的那一章），每闲聊一句就把那一章
+    重压一遍摘要写回库。compact 只整理对话（不改任何库），对话攒多了才动一次。
     """
     chapter = state.get("active_chapter") or {}
     if chapter.get("chapter_content") and not chapter.get("chapter_id"):
         return "confirm_chapter"
-    return "update"
+    return "compact"
 
 
 def route_after_load(state: State) -> str:
@@ -44,10 +50,13 @@ def route_after_resolve(state: State) -> str:
 
 
 def route_after_draft(state: State) -> str:
-    """一稿写完 / 改完：审稿开着就去 reader 查一遍，关着就直接停下来问用户。
+    """一稿写完 / 改完：按这一稿的严重程度决定审不审，审的话交给 reader 挑哪几路。
 
-    开关由 load 按 novel.reviewEnabled 读进 state.review_enabled。关掉的书走 confirm_chapter
-    —— 用户确认后落库，中间不插 reader 那一关（少了「正在审稿…」那道状态行）。
+    L1（纯文字润色、没动事实）不必审，直接进确认；书关掉审稿（review_enabled 为假）也一样
+    直接确认。其余（L2 / L3 / 没分级）都去 reader，由它按级挑：L2 只查连贯性与人物设定，
+    L3 / 没分级走全量。写新章 grade 恒为空 → 照旧全量审。
     """
-    return "reader" if state.get("review_enabled", True) else "confirm_chapter"
+    if state.get("change_grade") == "L1" or not state.get("review_enabled", True):
+        return "confirm_chapter"
+    return "reader"
 

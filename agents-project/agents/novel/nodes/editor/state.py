@@ -24,6 +24,8 @@ class EditorInput(TypedDict):
     user_message: str
     inspirations: list
     change_impact: list
+    # 人工改稿那一轮带上来的改后正文（非空即"这一轮是人工改"）。
+    manual_content: str
 
 
 class EditorOutput(TypedDict):
@@ -33,6 +35,10 @@ class EditorOutput(TypedDict):
     setting_changes: list
     change_impact: list
     edit_note: str
+    # 这一稿的严重程度（人工改稿判的、agent 改稿随台账报的）；父图 route_after_draft 据它分流。
+    change_grade: str
+    # 人工改稿消费完就把 manual_content 清空交回父图，免得它跨轮残留、把下一轮误判成人工改。
+    manual_content: str
 
 
 class EditorState(TypedDict, total=False):
@@ -54,3 +60,6 @@ class EditorState(TypedDict, total=False):
     change_impact: list         # 影响台账的行，update 落库
     approve_text: str           # 摆给用户看的"改动 + 影响范围"
     edit_note: str              # 没改成的理由，update 拿它回用户一句话
+    change_grade: str           # 这一稿的严重程度（L1/L2/L3，空 = 没分级）
+    manual: bool                # 人工改稿这一趟：prepare 据它直接把路引到 manual 节点
+    manual_content: str         # 人工改稿的改后正文，manual 节点消费后清空

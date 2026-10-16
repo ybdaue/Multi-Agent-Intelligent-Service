@@ -13,10 +13,14 @@ Exception，两侧的 except 都不接，于是既没有 error 事件也没有 t
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import AsyncIterator
 from typing import TypeVar
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 # 心跳间隔：远小于常见代理的读超时（nginx 默认 60s），留足余量。
 HEARTBEAT_INTERVAL = 15.0
@@ -33,7 +37,7 @@ _DONE = _Done()
 
 
 async def with_heartbeat(
-    source: AsyncIterator[T], interval: float = HEARTBEAT_INTERVAL
+    source: AsyncIterator[T], interval: float = HEARTBEAT_INTERVAL, label: str = ""
 ) -> AsyncIterator[T | None]:
     """给 source 包一层心跳：每静默 interval 秒 yield 一个 None（表示"该发一行注释了"）。
 
@@ -43,7 +47,10 @@ async def with_heartbeat(
       - 源流结束   → 消费端 return；
       - 源流抛异常 → 在消费端原样重抛（保持原来的错误语义，外层 except 照旧接得住）；
       - 消费端被取消（客户端断开）→ finally 里把后台 task 也取消，图随之停下。
+
+    label 只用于日志（"setup" / "writer"），好让两条流的心跳在日志里分得清。
     """
+    tag = f"[sse:{label}]" if label else "[sse]"
     queue: asyncio.Queue = asyncio.Queue()
 
     async def pump() -> None:
@@ -58,17 +65,28 @@ async def with_heartbeat(
             queue.put_nowait(_DONE)
 
     task = asyncio.create_task(pump())
+    beats = 0
+    last = time.monotonic()
     try:
         while True:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=interval)
             except asyncio.TimeoutError:
+                # 图闷住了：这一拍没有数据，靠一行注释把代理的读超时顶过去。
+                beats += 1
+                logger.debug("%s 心跳 #%d　上游已静默 %.0fs", tag, beats, time.monotonic() - last)
                 yield None
                 continue
+            now = time.monotonic()
+            if now - last >= interval:
+                logger.debug("%s 上游恢复：静默 %.1fs 后来了数据", tag, now - last)
+            last = now
             if item is _DONE:
                 return
             if isinstance(item, BaseException):
                 raise item
             yield item
     finally:
+        if beats:
+            logger.info("%s 本轮上游有静默，共发 %d 次心跳", tag, beats)
         task.cancel()

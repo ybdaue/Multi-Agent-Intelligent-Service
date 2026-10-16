@@ -37,12 +37,8 @@ _SCOPE = {
     )},
     **{t: 'chapterId IN (SELECT id FROM novel_chapter WHERE "novelId" = %s)' for t in (
         "novel_chapter_state",
-        "novel_chapter_inspiration",
         "novel_chapter_ref",
     )},
-    "novel_outline_ref": 'outlineId IN (SELECT id FROM novel_outline WHERE "novelId" = %s)',
-    "novel_timeline_ref": 'timelineId IN (SELECT id FROM novel_timeline WHERE "novelId" = %s)',
-    "novel_chronicle_ref": 'chronicleId IN (SELECT id FROM novel_chronicle WHERE "novelId" = %s)',
 }
 
 # 表名从 _SCOPE 推出来，模型只在这几张里挑，也不会有哪张表在 _SCOPE 里漏掉。
@@ -102,16 +98,20 @@ async def fetchDB(
     就用 fetchDB("novel_character", keyword="<角色名>")。
 
     能查的表（括号里是主要列，其余列看返回的 columns）：
-      novel_character 人物（name / sex / age / identity / personality / ability / role）
+      novel_character 人物（name / sex / age / identity / personality / ability / role /
+        firstAppearanceChapterId 首次出现的章）
       novel_relation 人物关系（fromCharId、toCharId 是 novel_character.id / relationType /
-        strength / description）
-      novel_timeline 时间线（title / year / description）
-      novel_chronicle 编年史（title / year / content）
+        strength / description / firstAppearanceChapterId 首次出现的章）
+      novel_timeline 时间线（title / year / description / startChapterId 起始章）
+      novel_chronicle 编年史（title / year / content / startChapterId 事件发生的章）
       novel_item 物品（name / type / description / ownerId 持有者 /
         firstAppearanceChapterId 首次出现的章 / status）
-      novel_faction 势力（name / type / location / stance / description）
-      novel_world_rule 世界规则、力量体系（name / rule / startChapterId / endChapterId）
-      novel_outline 大纲（content / startChapterId / endChapterId）
+      novel_faction 势力（name / type / location / stance / description /
+        firstAppearanceChapterId 首次出现的章）
+      novel_world_rule 世界规则、力量体系（name / rule /
+        firstAppearanceChapterId 首次出现的章 / status）
+      novel_outline 大纲（content / level 主线main/阶段线phase/支线branch / startChapterId
+        起始章 / completed 是否已收尾）
       novel_foreshadowing 伏笔（description / plantedChapterId 埋设章 /
         resolvedChapterId 回收章 / status）
       novel_chapter 章节（order 序号 / title / summary 精简 / content 正文 / status / wordCount；
@@ -119,14 +119,17 @@ async def fetchDB(
       novel_chapter_state 单章收尾时的状态快照（protagonistState 主角状态 / storyTime 故事内时间 /
         eventProgress 事件进度 / worldState 世界局势）
       novel_inspiration 全书灵感（title 显示名 / category 内容类型数组，可取多个 style/plot/
-        character/meme/setting/other / type 素材形态 text/file/url / content / usedChapterIds 用在哪些章）
-      novel_chapter_inspiration 本章灵感（type / content / status）
+        character/meme/setting/other / type 素材形态 text/file/url / content；用在哪些章看
+        novel_chapter_ref 里 refType='inspiration' 的行）
       novel_chapter_ref 本章关联的人物、势力、时间线、伏笔、物品（refType / refId /
         role 戏份：key 关键 / state 状态 / mention 提及）
-      novel_outline_ref、novel_timeline_ref、novel_chronicle_ref 同理，挂在大纲、时间线、编年史上
 
-    带 ChapterId 的列（firstAppearanceChapterId / startChapterId / endChapterId /
-    plantedChapterId / resolvedChapterId / usedChapterIds）存的是 novel_chapter.id，不是章节号。
+    会随剧情演变的设定（character / faction / item / world_rule / relation）每变一次建一版新行，
+    旧行的 next 指向它变成的新行（next 为空的那一行才是「当前版」）；每条版本行的
+    firstAppearanceChapterId 记它出现在哪一章。
+
+    带 ChapterId 的列（firstAppearanceChapterId / startChapterId /
+    plantedChapterId / resolvedChapterId）存的是 novel_chapter.id，不是章节号。
     要按「第几章」判断得先 join novel_chapter 取它的 order。
 
     Args:

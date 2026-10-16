@@ -21,6 +21,7 @@ import ImpactsPanel from "../ImpactsPanel";
 import InspirationPanel from "../InspirationPanel";
 import SettingPanel from "../SettingPanel";
 import { PANEL_SPECS } from "../SettingPanel/specs";
+import { useNovelQuery } from "../useNovelQuery";
 import type {
   Chapter,
   ChapterStatus,
@@ -40,7 +41,7 @@ const WORK_TABS: {
   { key: "outline", label: "小说大纲", Icon: ReadOutlined },
   { key: "characters", label: "人物档案", Icon: TeamOutlined },
   { key: "world", label: "世界观", Icon: GlobalOutlined },
-  { key: "timeline", label: "世界线", Icon: BranchesOutlined },
+  { key: "timeline", label: "时间线", Icon: BranchesOutlined },
   { key: "factions", label: "势力阵营", Icon: AppstoreOutlined },
   { key: "chronicle", label: "编年史", Icon: HistoryOutlined },
   { key: "items", label: "物品设定", Icon: GiftOutlined },
@@ -50,6 +51,14 @@ const WORK_TABS: {
   { key: "export", label: "全书导出", Icon: ExportOutlined },
   { key: "impacts", label: "受影响点", Icon: AlertOutlined },
 ];
+
+/**
+ * 「受影响点」标签右上角那个红数字只要一个计数，不摆内容 —— 只认每条的状态。
+ * 与 ImpactsPanel 用的是同一个 URL，两边共用 useNovelQuery 的缓存，不重复打后端。
+ */
+interface ImpactsBadge {
+  changes: { items: { status: string }[] }[];
+}
 
 interface WorkAreaProps {
   tab: WorkTab;
@@ -62,6 +71,16 @@ interface WorkAreaProps {
   onContentChange: (content: string) => void;
   /** 改当前这一章的状态（完成 / 草稿 / 待修复），落库 */
   onChangeStatus: (status: ChapterStatus) => void;
+  /** 正文有没有没保存的改动（决定保存按钮亮不亮） */
+  dirty: boolean;
+  /** 这一章能不能手改（临时章 / 生成中 / 已定稿都不能） */
+  canEdit: boolean;
+  /** 不能改的原因，按钮置灰时当 title 提示；空串 = 能改 */
+  editBlockReason: string;
+  /** 保存按钮转圈：这一章正落着一轮 */
+  saving: boolean;
+  /** 点保存：把改后正文交给图里（重报台账、定级、审稿、入库确认） */
+  onSave: () => void;
   messages: Message[];
   onSend: (text: string, attachments: InspirationItem[]) => void;
   /** 正在流式生成的那一稿，正文区显示它、盖住这一章原有的内容 */
@@ -96,6 +115,11 @@ export default function WorkArea({
   chapter,
   onContentChange,
   onChangeStatus,
+  dirty,
+  canEdit,
+  editBlockReason,
+  saving,
+  onSave,
   messages,
   onSend,
   draft,
@@ -114,6 +138,17 @@ export default function WorkArea({
   const activeTab = WORK_TABS.find((t) => t.key === tab) ?? WORK_TABS[0];
   const ActiveIcon = activeTab.Icon;
 
+  // 「受影响点」标签右上角的红数字：未修复的影响有几处。只要不是「已修复」（fixed）都算 ——
+  // 未处理 / 已接受（同意改但还没改）/ 已跳过都计入。没选小说、没拉到时是 0，不出徽标。
+  const impactsUrl = threadId
+    ? `/api/novel/method/impacts?threadId=${encodeURIComponent(threadId)}`
+    : null;
+  const { data: impacts } = useNovelQuery<ImpactsBadge>(impactsUrl);
+  const unresolvedImpacts = (impacts?.changes ?? []).reduce(
+    (count, change) => count + change.items.filter((item) => item.status !== "fixed").length,
+    0,
+  );
+
   return (
     <main className={styles.area}>
       <div className={styles.tabBar}>
@@ -126,6 +161,11 @@ export default function WorkArea({
           >
             <Icon className={styles.tabIcon} />
             <span>{label}</span>
+            {key === "impacts" && unresolvedImpacts > 0 ? (
+              <span className={styles.tabBadge}>
+                {unresolvedImpacts > 99 ? "99+" : unresolvedImpacts}
+              </span>
+            ) : null}
           </button>
         ))}
       </div>
@@ -137,6 +177,11 @@ export default function WorkArea({
               chapter={chapter}
               onContentChange={onContentChange}
               onChangeStatus={onChangeStatus}
+              dirty={dirty}
+              canEdit={canEdit}
+              editBlockReason={editBlockReason}
+              saving={saving}
+              onSave={onSave}
               messages={messages}
               onSend={onSend}
               threadId={threadId}

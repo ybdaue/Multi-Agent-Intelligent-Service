@@ -7,7 +7,7 @@ import type { InspirationItem } from "./types";
 /** 图停下来问用户的那一问：话 + 可点的出口 + 交了但还没落库的那一稿 */
 export interface NovelAgentQuestion {
   text: string;
-  /** 后端给的出口按钮（收下 / 按库里改）。空数组就是普通提问，照旧打字答 */
+  /** 后端给的出口按钮（收下 / 按库里改 / 这一稿不要了）。空数组就是普通提问，照旧打字答 */
   options: { id: string; label: string }[];
   /** 那一稿正文。落库之前它只活在后端 checkpoint 里，刷新后靠它重建临时框 */
   draft: { order: number | null; title: string; content: string } | null;
@@ -205,7 +205,7 @@ export function useNovelAgent(base: "agent" | "setup" = "agent") {
 
   const send = useCallback(
     async (
-      action: "run" | "resume",
+      action: "run" | "resume" | "manual",
       fields: Record<string, string>,
       handlers: NovelAgentHandlers,
     ) => {
@@ -331,6 +331,22 @@ export function useNovelAgent(base: "agent" | "setup" = "agent") {
   );
 
   /**
+   * 人工改稿：用户在正文框里改完点了保存，把这一章**改后的正文**交给图里。
+   *
+   * 走 /manual 口（不是 /run）：后端见 manual_content 就短路意图识别、直接进 editor.manual
+   * 比对两稿、重报台账、定严重程度，再按级派发审稿、走入库确认。content 非空是这口的前提。
+   */
+  const manual = useCallback(
+    (
+      novelId: string,
+      chapterId: string,
+      content: string,
+      handlers: NovelAgentHandlers,
+    ) => send("manual", { novelId, chapterId, content }, handlers),
+    [send],
+  );
+
+  /**
    * 掐断这一轮。只是断掉客户端这条流，后端据此把这一轮记成 cancelled，
    * 再进这本书时会提示"上一轮中断了"，不需要另调接口。
    */
@@ -338,5 +354,5 @@ export function useNovelAgent(base: "agent" | "setup" = "agent") {
     abortRef.current?.abort();
   }, []);
 
-  return { run, resume, stop, busy };
+  return { run, resume, manual, stop, busy };
 }

@@ -32,10 +32,20 @@
   text-overflow: ellipsis;
 }
 
-/* 本轮写在别的章上时右端那句提示，跟标题隔开 */
-.runHint {
+/* 标题栏右端那一组：本轮进度提示 + 保存按钮，一起靠右 */
+.headerRight {
   flex-shrink: 0;
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+/* 本轮写在别的章上时右端那句提示，跟标题隔开 */
+.runHint {
+  flex-shrink: 1;
+  min-width: 0;
   max-width: 14rem;
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
@@ -46,6 +56,46 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 包一层 span 当 title 载体：disabled 的 button 在浏览器里不弹 title */
+.saveWrap {
+  flex-shrink: 0;
+}
+
+.saveBtn {
+  padding: 0.15rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+  &:hover:not(:disabled) {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+}
+
+/* 有未保存改动且能改：实心高亮，提示用户点它 */
+.saveBtnActive {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: #fff;
+
+  &:hover:not(:disabled) {
+    background: var(--color-primary-dark);
+    border-color: var(--color-primary-dark);
+    color: #fff;
+  }
 }
 
 .badge {

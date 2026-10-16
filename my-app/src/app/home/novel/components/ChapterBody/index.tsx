@@ -17,6 +17,16 @@ interface ChapterBodyProps {
   chapter: Chapter;
   onContentChange: (content: string) => void;
   onChangeStatus: (status: ChapterStatus) => void;
+  /** 正文有没有没保存的改动（决定保存按钮亮不亮） */
+  dirty: boolean;
+  /** 这一章能不能手改（临时章 / 生成中 / 已定稿都不能） */
+  canEdit: boolean;
+  /** 不能改的原因，按钮置灰时当 title 提示；空串 = 能改 */
+  editBlockReason: string;
+  /** 保存按钮转圈：这一章正落着一轮 */
+  saving: boolean;
+  /** 点保存：把改后正文交给图里（重报台账、定级、审稿、入库确认） */
+  onSave: () => void;
   messages: Message[];
   onSend: (text: string, attachments: InspirationItem[]) => void;
   /** 这本书的 id（= threadId）：透给 AiPanel，从灵感库挑灵感时要用 */
@@ -46,6 +56,11 @@ export default function ChapterBody({
   chapter,
   onContentChange,
   onChangeStatus,
+  dirty,
+  canEdit,
+  editBlockReason,
+  saving,
+  onSave,
   messages,
   onSend,
   threadId,
@@ -71,6 +86,9 @@ export default function ChapterBody({
 
   // 本轮写在别的章上：那一章照常在写，这一章该显示什么显示什么，只在标题栏右边挂一句提示
   const runningElsewhere = runChapter && runChapter.id !== chapter.id ? runChapter : null;
+
+  // 保存按钮的悬停说明：能改时解释按钮为何还灰着，不能改时给出原因
+  const saveHint = canEdit ? (dirty ? "保存这一章的改动" : "正文没有改动") : editBlockReason;
 
   // 流式正文越写越长，跟着滚到底；切到正在生成的章时也滚到底
   useEffect(() => {
@@ -100,12 +118,27 @@ export default function ChapterBody({
               <ChapterStatusSelect value={chapter.status} onChange={onChangeStatus} />
             </>
           )}
-          {/* 本轮在别的章上写：这一章照常看，只在最右边报一句写的是哪一章 */}
-          {runningElsewhere && (
-            <span className={styles.runHint}>
-              {runningElsewhere.pending ? "待确认" : "正在生成"} {runningElsewhere.title}
-            </span>
-          )}
+          {/* 右端一组：本轮在别的章上写的那句提示 + 保存按钮 */}
+          <div className={styles.headerRight}>
+            {runningElsewhere && (
+              <span className={styles.runHint}>
+                {runningElsewhere.pending ? "待确认" : "正在生成"} {runningElsewhere.title}
+              </span>
+            )}
+            {/* 临时章 / 定稿章也挂着这个按钮，只是置灰 + title 说明原因 */}
+            {!draft && (
+              <span className={styles.saveWrap} title={saveHint}>
+                <button
+                  type="button"
+                  className={`${styles.saveBtn} ${dirty && canEdit ? styles.saveBtnActive : ""}`}
+                  disabled={!canEdit || !dirty || saving}
+                  onClick={onSave}
+                >
+                  {saving ? "保存中…" : "保存"}
+                </button>
+              </span>
+            )}
+          </div>
         </div>
 
         {draft ? (

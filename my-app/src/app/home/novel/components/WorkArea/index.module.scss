@@ -31,6 +31,7 @@
 }
 
 .tab {
+  position: relative;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -59,6 +60,26 @@
 
 .tabIcon {
   font-size: 0.875rem;
+}
+
+/* 「受影响点」右上角的红数字：未修复的影响有几处。贴在 tab 的右上角，不占流式布局 */
+.tabBadge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
 }
 
 .content {

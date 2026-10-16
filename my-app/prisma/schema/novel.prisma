@@ -11,6 +11,7 @@ enum RefType {
   item //novel_item
   inspiration //novel_inspiration
   world_rule //novel_world_rule
+  relation //novel_relation
 }
 
 // 改动波及的对象类型：sourceType（改的是谁）与 targetType（波及到谁）共用这一套取值。
@@ -109,7 +110,6 @@ model novel_chapter {
   novel        novel                       @relation(references: [id], fields: [novelId], onDelete: Cascade)
   state        novel_chapter_state?
   refs         novel_chapter_ref[]
-  inspirations novel_chapter_inspiration[]
 
   @@unique([novelId, order])
 }
@@ -132,13 +132,15 @@ model novel_outline {
   id             String   @id @default(cuid())
   novelId        String
   level          String   @default("main") //分级：主线 main / 阶段线 phase / 支线 branch
-  status         String //大纲状态
+  status         String //大纲状态（审校状态，不是生命周期）
+  // 生命周期：这条线还在写就是 false，收尾了置 true。取代原来的 endChapterId ——
+  // 「收尾章是哪一章」由该章自己的 outline ref（novel_chapter_ref）记，删除收尾章不再破坏语义。
+  completed      Boolean  @default(false)
   // 包含关系：主线 ⊃ 阶段线 ⊃ 支线。阶段线挂主线、支线挂阶段线；主线自身 parentId 为空。
   // SetNull 而非 Cascade：重写某一章会撤掉「从这一章起头」的 phase/branch，级联删除会把后面
   // 章节挂在其名下的支线也一并带走 —— 那是后面的工作，不该被这一章的重写牵连。
   parentId       String?
   startChapterId String? //适用起始章节（novel_chapter.id）
-  endChapterId   String? //适用结束章节（novel_chapter.id）
   order          Int      @default(0) //排序
   content        String //大纲内容
   createdAt      DateTime @default(now()) @db.Timestamptz
@@ -147,7 +149,6 @@ model novel_outline {
   parent   novel_outline?      @relation("OutlineTree", fields: [parentId], references: [id], onDelete: SetNull)
   children novel_outline[]     @relation("OutlineTree")
   novel    novel               @relation(references: [id], fields: [novelId], onDelete: Cascade)
-  refs     novel_outline_ref[]
 
   @@index([novelId, order])
   @@index([novelId, parentId])
@@ -166,30 +167,38 @@ model novel_character {
   personality String //性格
   ability     String //能力
   role        String   @default("配角") //角色身份：主角 / 配角 / 反派
+  firstAppearanceChapterId String? //首次出现章节（novel_chapter.id）
+  // 版本链：角色会随剧情变（境界 / 处境 / 身份）。每变一次新建一行，旧行的 next 指向新行
+  // （无外键，自引用链），这一版从哪一章起生效由本行的 firstAppearanceChapterId 表达。
+  // next 为空的那一行就是"当前版"。同名多版是正常的，所以不设 (novelId, name) 唯一。
+  next        String?
   createdAt   DateTime @default(now()) @db.Timestamptz
   updatedAt   DateTime @updatedAt @db.Timestamptz
 
   novel novel        @relation(references: [id], fields: [novelId], onDelete: Cascade)
   items novel_item[]
 
-  @@unique([novelId, name])
   @@index([novelId, role])
+  @@index([novelId, next])
 }
 
 model novel_world_rule {
-  id             String   @id @default(cuid())
-  novelId        String
-  name           String //规则名
-  rule           String //规则内容
-  status         String //状态
-  startChapterId String? //生效起始章节（novel_chapter.id）
-  endChapterId   String? //生效结束章节（novel_chapter.id）
-  createdAt      DateTime @default(now()) @db.Timestamptz
-  updatedAt      DateTime @updatedAt @db.Timestamptz
+  id        String   @id @default(cuid())
+  novelId   String
+  name      String //规则名
+  rule      String //规则内容
+  status    String //状态
+  firstAppearanceChapterId String? //首次出现章节（novel_chapter.id）
+  // 版本链：规则会改（世界的规则被改写 / 补全）。旧行的 next 指向新行（无外键，自引用链），
+  // 这一版从哪一章起生效由本行的 firstAppearanceChapterId 表达。next 为空的那一行是"当前版"。
+  next      String?
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
 
   novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
 
   @@index([novelId])
+  @@index([novelId, next])
 }
 
 model novel_timeline {
@@ -199,13 +208,12 @@ model novel_timeline {
   status         String //状态
   year           String //年份
   description    String //描述
+  // 记录类、值不变：只留"事件发生在哪一章"的起点，与章节的挂接走 novel_chapter_ref。endChapterId 已删。
   startChapterId String? //涉及起始章节（novel_chapter.id）
-  endChapterId   String? //涉及结束章节（novel_chapter.id）
   createdAt      DateTime @default(now()) @db.Timestamptz
   updatedAt      DateTime @updatedAt @db.Timestamptz
 
   novel novel                @relation(references: [id], fields: [novelId], onDelete: Cascade)
-  refs  novel_timeline_ref[]
 
   @@index([novelId])
 }
@@ -218,15 +226,18 @@ model novel_faction {
   location    String //所在地
   description String //描述
   stance      String //立场
+  // 版本链：势力会变（处境 / 立场）。旧行的 next 指向新行（无外键，自引用链），这一版从哪一章
+  // 起生效由本行的 firstAppearanceChapterId 表达。next 为空的那一行是"当前版"。
+  firstAppearanceChapterId String? //首次出现章节（novel_chapter.id）
+  next        String?
   createdAt   DateTime @default(now()) @db.Timestamptz
   updatedAt   DateTime @updatedAt @db.Timestamptz
 
   novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
 
-  // 同名势力只能有一行：writer 每章都会报「新增势力」，没有这个约束会插出一堆重复行，
-  // 之后 ref 指向哪一行就不确定了，影响分析会给出两个同名实体。
-  @@unique([novelId, name])
+  // 同名多版是正常的（版本链），所以不再设 (novelId, name) 唯一 —— "同时只一版开着"由写入代码守。
   @@index([novelId])
+  @@index([novelId, next])
 }
 
 model novel_chronicle {
@@ -235,11 +246,12 @@ model novel_chronicle {
   title     String //事件标题
   year      String //年份
   content   String //内容
+  // 记录类、值不变：只留"事件发生在哪一章"的起点。与章节的挂接另走 novel_chapter_ref。
+  startChapterId String? //涉及起始章节（novel_chapter.id）
   createdAt DateTime @default(now()) @db.Timestamptz
   updatedAt DateTime @updatedAt @db.Timestamptz
 
   novel novel                 @relation(references: [id], fields: [novelId], onDelete: Cascade)
-  refs  novel_chronicle_ref[]
 
   @@index([novelId])
 }
@@ -253,41 +265,48 @@ model novel_item {
   firstAppearanceChapterId String? //首次出现章节（novel_chapter.id）
   status                   String //状态
   ownerId                  String? //持有者（人物 id）
+  // 版本链：物品会升级 / 易主。旧行的 next 指向新行（无外键，自引用链），这一版从哪一章起生效
+  // 由本行的 firstAppearanceChapterId 表达。next 为空的那一行是"当前版"。
+  next                     String?
   createdAt                DateTime @default(now()) @db.Timestamptz
   updatedAt                DateTime @updatedAt @db.Timestamptz
 
   novel novel            @relation(references: [id], fields: [novelId], onDelete: Cascade)
   owner novel_character? @relation(references: [id], fields: [ownerId], onDelete: SetNull)
 
-  // 同小说内物品重名没有意义，理由同 novel_faction：防止 writer 反复报「新增物品」插出重复行。
-  @@unique([novelId, name])
+  // 同名多版是正常的（版本链），不再设 (novelId, name) 唯一 —— "同时只一版开着"由写入代码守。
   @@index([novelId, firstAppearanceChapterId])
   @@index([ownerId])
+  @@index([novelId, next])
 }
 
 model novel_relation {
-  id             String   @id @default(cuid())
-  novelId        String
-  fromCharId     String //源角色 id
-  toCharId       String //目标角色 id
-  relationType   String //关系类型
-  strength       Int //关系强度
-  description    String //描述
-  startChapterId String? //起始章节（novel_chapter.id）
-  endChapterId   String? //结束章节（novel_chapter.id）
-  status         String //状态
-  createdAt      DateTime @default(now()) @db.Timestamptz
-  updatedAt      DateTime @updatedAt @db.Timestamptz
+  id           String   @id @default(cuid())
+  novelId      String
+  fromCharId   String //源角色 id
+  toCharId     String //目标角色 id
+  relationType String //关系类型
+  strength     Int //关系强度
+  description  String //描述
+  status       String //状态
+  // 版本链：关系会变（师徒 → 反目）。旧行的 next 指向新行（无外键，自引用链），这一版从哪一章
+  // 起生效由本行的 firstAppearanceChapterId 表达。next 为空的那一行是"当前版"。两端
+  // fromCharId / toCharId 是身份、不进版本变化（见 agents/novel/utils/ledger.py 的 VERSION_EDIT）。
+  firstAppearanceChapterId String? //首次出现章节（novel_chapter.id）
+  next         String?
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  updatedAt    DateTime @updatedAt @db.Timestamptz
 
   novel novel @relation(references: [id], fields: [novelId], onDelete: Cascade)
 
-  @@unique([novelId, fromCharId, toCharId, relationType])
-  // 反查「这个角色牵涉了哪些关系」要用 fromCharId，只有 toCharId 那条索引走不到。
+  // 三列唯一已删（版本链下同名多版）：反查「这个角色牵涉了哪些关系」照旧用 from/to 那两条索引。
   @@index([novelId, fromCharId])
   @@index([novelId, toCharId])
+  @@index([novelId, next])
 }
 
-// 全书灵感库：跨章节的构思，usedChapterIds 记录用在哪些章
+// 全书灵感库：跨章节的构思。「用在哪些章」由 novel_chapter_ref 记（refType='inspiration'），
+// 不再用数组列。
 model novel_inspiration {
   id             String   @id @default(cuid())
   novelId        String
@@ -300,7 +319,6 @@ model novel_inspiration {
   lifecycle      String   @default("reuse") //生命周期：reuse 复用 / once 单次（用过后退出候选）
   scenario       String   @default("") //可使用场景（模型翻译产出）
   digest         String   @default("") //写作指引（模型翻译产出，写手照它落笔）
-  usedChapterIds String[] //已使用章节（novel_chapter.id 列表），由 update 落章后自动补
   createdAt      DateTime @default(now()) @db.Timestamptz
   updatedAt      DateTime @updatedAt @db.Timestamptz
 
@@ -309,28 +327,18 @@ model novel_inspiration {
   @@index([novelId])
 }
 
-// 章节灵感库：写某一章时产生的想法，只属于该章
-model novel_chapter_inspiration {
-  id        String   @id @default(cuid())
-  chapterId String
-  type      String //灵感类型
-  content   String //灵感内容
-  status    String //状态
-  createdAt DateTime @default(now()) @db.Timestamptz
-  updatedAt DateTime @updatedAt @db.Timestamptz
-
-  chapter novel_chapter @relation(references: [id], fields: [chapterId], onDelete: Cascade)
-
-  @@index([chapterId])
-}
+// 章节灵感库已被书级灵感库 novel_inspiration 取代（「用在哪些章」改由 novel_chapter_ref 记）。
 
 model novel_foreshadowing {
   id                String   @id @default(cuid())
   novelId           String
   description       String //伏笔描述
+  resolveScenario   String   @default("") //打算在什么场景下收尾（埋的时候写清，planner 据此判断何时收）
   plantedChapterId  String? //埋设章节（novel_chapter.id）
   resolvedChapterId String? //回收章节（novel_chapter.id）
-  status            String //状态
+  // 收尾状态：open 未收尾 / resolved 已收尾。由写手在台账里报（埋进 new、收进 resolved），
+  // 不由别的写入路径碰 —— 别的设定用 draft/done 那套审校状态，伏笔这两值只表达"收没收回"。
+  status            String   @default("open")
   createdAt         DateTime @default(now()) @db.Timestamptz
   updatedAt         DateTime @updatedAt @db.Timestamptz
 
@@ -338,12 +346,14 @@ model novel_foreshadowing {
 
   @@index([novelId, plantedChapterId])
   @@index([novelId, resolvedChapterId])
+  @@index([novelId, status])
 }
 
-// 章节 / 大纲 / 时间线 / 编年史 的关联表：本章 / 本条涉及的人物、势力、时间线、大纲、
-// 编年史、伏笔、物品、灵感、世界规则。refType 决定 refId 指向哪张表；role 是戏份，
-// 九类通用（见 agents/novel/utils/ledger.py 的 ROLE_VALUES）。refId 上没有外键 ——
-// refType 决定它指向哪张表，一个列没法对九张表建约束，所以悬空 id 靠影响检测去报，不靠库拦。
+// 章节的关联表：这一章涉及的人物、势力、时间线、大纲、编年史、伏笔、物品、灵感、世界规则。
+// refType 决定 refId 指向哪张表；role 是戏份，九类通用（见 agents/novel/utils/ledger.py 的
+// ROLE_VALUES）。refId 上没有外键 —— refType 决定它指向哪张表，一个列没法对九张表建约束，
+// 所以悬空 id 靠影响检测去报，不靠库拦。大纲 / 时间线 / 编年史 与章节的挂接也走这张表，
+// 它们各自的 *_ref 从未被写入，已随本次清理删除。
 model novel_chapter_ref {
   id        String   @id @default(cuid())
   chapterId String
@@ -355,48 +365,6 @@ model novel_chapter_ref {
   chapter novel_chapter @relation(references: [id], fields: [chapterId], onDelete: Cascade)
 
   @@unique([chapterId, refType, refId])
-  @@index([refType, refId])
-}
-
-model novel_outline_ref {
-  id        String   @id @default(cuid())
-  outlineId String
-  refType   RefType
-  refId     String //目标行 id
-  role      String? //戏份：key 关键 / state 状态 / mention 提及
-  createdAt DateTime @default(now()) @db.Timestamptz
-
-  outline novel_outline @relation(references: [id], fields: [outlineId], onDelete: Cascade)
-
-  @@unique([outlineId, refType, refId])
-  @@index([refType, refId])
-}
-
-model novel_timeline_ref {
-  id         String   @id @default(cuid())
-  timelineId String
-  refType    RefType
-  refId      String //目标行 id
-  role       String? //戏份：key 关键 / state 状态 / mention 提及
-  createdAt  DateTime @default(now()) @db.Timestamptz
-
-  timeline novel_timeline @relation(references: [id], fields: [timelineId], onDelete: Cascade)
-
-  @@unique([timelineId, refType, refId])
-  @@index([refType, refId])
-}
-
-model novel_chronicle_ref {
-  id          String   @id @default(cuid())
-  chronicleId String
-  refType     RefType
-  refId       String //目标行 id
-  role        String? //戏份：key 关键 / state 状态 / mention 提及
-  createdAt   DateTime @default(now()) @db.Timestamptz
-
-  chronicle novel_chronicle @relation(references: [id], fields: [chronicleId], onDelete: Cascade)
-
-  @@unique([chronicleId, refType, refId])
   @@index([refType, refId])
 }
 

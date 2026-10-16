@@ -16,6 +16,9 @@ class ReaderInput(TypedDict):
     writer_context: dict                # resolve 预查的上下文，gather 复用跳过查库
     # 重写回炉时由上一趟带过来的影响台账：里面 reader 自己写的问题行要在这里翻成已修复。
     change_impact: List[dict]
+    # 这一稿的严重程度（L1/L2/L3，空 = 没分级）。gather 之后据它派发审查员：
+    # L2 只跑 logic+pacing，其余（L3 / 空）跑全量。L1 在父图就被 route_after_draft 拦下了，进不来。
+    change_grade: str
 
 
 class ReaderOutput(TypedDict):
@@ -40,6 +43,7 @@ class ReaderState(TypedDict, total=False):
     chapter_inspirations: list    # 本章最终选用的灵感（style 核写作指引用）
     writer_context: dict          # resolve 预查的上下文，gather 复用跳过查库
     change_impact: List[dict]     # 重写回炉时由上一趟带过来的影响行
+    change_grade: str             # 这一稿的严重程度（L1/L2/L3，空 = 没分级）
     facts: str                    # 本章台账 refs 指向的那些行现在的档案，给 pacing
     logic_input: str              # gather 备好的三份开场白
     pacing_input: str

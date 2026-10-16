@@ -15,7 +15,6 @@ import {
   SendOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { Switch } from "antd";
 import InspirationPicker from "../InspirationPicker";
 import type { InspirationItem, Message } from "../types";
 import styles from "./index.module.scss";
@@ -43,7 +42,7 @@ interface AiPanelProps {
   onStop: () => void;
   /** 图在等用户答复，输入框的提示语跟着换 */
   pendingQuestion: boolean;
-  /** 停在确认上时后端给的出口（收下 / 按库里改）。为空就是普通提问，照旧打字答 */
+  /** 停在确认上时后端给的出口（收下 / 按库里改 / 这一稿不要了）。为空就是普通提问，照旧打字答 */
   answerOptions: { id: string; label: string }[];
   /** 点了出口按钮：按它答，不用打字 */
   onAnswer: (option: { id: string; label: string }) => void;
@@ -221,7 +220,17 @@ export default function AiPanel({
         <span className={styles.reviewLabel} title="关掉后 AI 写完不再审稿，直接进入确认">
           AI 审稿
         </span>
-        <Switch size="small" checked={reviewEnabled} onChange={onToggleReview} />
+        {/* 原生开关：antd Switch 在 React 19 下点一下会走 Wave 波纹、触发兼容告警，换成自绘的 */}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={reviewEnabled}
+          aria-label="AI 审稿"
+          className={`${styles.reviewSwitch} ${reviewEnabled ? styles.reviewSwitchOn : ""}`}
+          onClick={() => onToggleReview(!reviewEnabled)}
+        >
+          <span className={styles.reviewKnob} />
+        </button>
       </div>
 
       <div className={styles.composer}>
@@ -270,7 +279,7 @@ export default function AiPanel({
               disabled
                 ? "AI 正在处理，稍候…"
                 : pendingQuestion
-                  ? "回复上面的问题：收下，或说一句往哪儿改"
+                  ? "回复上面的问题：收下、说一句往哪儿改，或说不要了"
                   : "Enter发送、Shift+Enter换行即可"
             }
             onChange={(e) => {

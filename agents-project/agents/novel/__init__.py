@@ -175,12 +175,14 @@ novel_workflow.add_conditional_edges(
 novel_workflow.add_edge("reader","confirm_chapter")
 # 闲聊不一定就收尾：用户没点确认按钮、而是问了一句时，这一轮是"先答他"，答完还得回去
 # 把同一问再摆一次（那一稿仍在 active_chapter 里没落库，见 utils/classify.route_after_chat）。
+# 没有待确认的稿就直接去 compact —— 闲聊只答话，不走 update / summarize_chapter 那两笔写库的
+# （见 route_after_chat 的说明），收尾只把对话压一压。
 novel_workflow.add_conditional_edges(
     "chat",
     route_after_chat,
     {
         "confirm_chapter":"confirm_chapter",
-        "update":"update",
+        "compact":"compact",
     },
 )
 # 一轮的终点是 compact（对话精简），不是 END —— 它排在落库之后，压不动也不影响本轮结果。

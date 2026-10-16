@@ -34,6 +34,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
 from agents.novel import novel_agent
+from agents.novel.utils.chapter_information import get_chapter_status
 from agents.novel.utils.history import last_reply, visible_messages
 from agents.novel.utils.inspiration import fetch_inspirations
 from agents.novel.utils.run_state import (
@@ -89,8 +90,9 @@ _STAGE_TEXT = {
     "reader.pacing": "正在审稿…",
     "reader.style": "正在审稿…",
     "reader.save": "正在汇总审稿意见…",
-    # editor 子图：prepare → plan → settle → impact → approve → revise → collect
+    # editor 子图：prepare →（manual ∥ plan）→ settle → impact → approve → revise → collect
     "editor.prepare": "正在准备要改的地方…",
+    "editor.manual": "正在核对这一章的改动…",
     "editor.plan": "正在理解你要改什么…",
     "editor.settle": "正在定夺怎么改…",
     "editor.impact": "正在估算改动范围…",
@@ -101,6 +103,9 @@ _STAGE_TEXT = {
 
 # 挂了子图的父图节点：它们内部已经报过更细的那一步，父图节点跑完时别再拿粗文案盖回去。
 _SUBGRAPH_NODES = frozenset({"writer", "reader", "editor"})
+
+# 人工改稿能改的章节状态：草稿 / 待修复。与前端保存按钮的置灰口径、editor.manual 里的后端闸一致。
+_EDITABLE_STATUSES = frozenset({"draft", "fixing"})
 
 
 def _stage_key(ns, name: str) -> str:
@@ -164,8 +169,8 @@ def _config(user_id: str, novel_id: str, chapter_id: str = "", callbacks: Option
 def _question(value) -> dict:
     """interrupt 交上来的问题归一化成 {text, options}。
 
-    confirm_chapter 现在传的是对象（text 加给前端做按钮的 options）；editor.approve 那处还是
-    老样子传纯字符串，这里一并兜住 —— 前端只认这一种形状。
+    confirm_chapter 与 editor.approve 现在都传对象（text 加给前端做按钮的 options），这里仍
+    兼容纯字符串那种老形状 —— 前端只认这一种形状。
     """
     if isinstance(value, dict):
         return {
@@ -395,13 +400,41 @@ async def _pending(user_id: str, novel_id: str, chapter_id: str) -> dict:
     }
 
 
-def _settle_later(user_id: str, novel_id: str, status: str) -> None:
-    """把收尾那笔写库派出去，不让它拖住或拖垮这一条流。
+async def _settle(user_id: str, novel_id: str, chapter_id: str, status: str, note: str) -> None:
+    """收尾两笔：这一轮记进 run 账本；没跑完的那种，再往对话历史里补一句话。
 
-    生成器被取消（客户端断开、服务端超时）时 finally 里再 await 会立刻重抛，写不进去 ——
+    对话历史也在 checkpoint 里（state.messages），所以"上一轮中断了"这句得写进 state —— 刷新 /
+    切回这本书时由 /history 带出来。这一轮助手没有别的回话，不补这一句，用户回来就是空的。
+    """
+    await mark_settled(user_id, novel_id, status)
+    if not note:
+        return
+    try:
+        config = _config(user_id, novel_id, chapter_id)
+        values = _snapshot_values(await novel_agent.aget_state(config))
+        # 停在提问上的不算中断 —— 那一轮已经把问题摆出来了，前端由 /pending 重建那一问。
+        # 其余情况都不许现在动 state：aupdate_state 会把快照上的 interrupt 抹掉（/clear 那道闸
+        # 拦的就是这个），抹掉之后 /pending 认不出那一稿，用户就再也收不下、改不了了。
+        if values.get("__interrupt__"):
+            return
+        # 连着掐几次、中间又没说过话：同样的句子不念第二遍。
+        pairs = visible_messages(values.get("messages") or [])
+        if pairs and pairs[-1] == ("assistant", note):
+            return
+        await novel_agent.aupdate_state(config, {"messages": [AIMessage(content=note)]})
+    except Exception as e:  # 记不上就算了，别把收尾也拖垮（账本那一笔已经落了）
+        print(f"[novel] 把中断提示写进对话失败：{e}")
+
+
+def _settle_later(user_id: str, novel_id: str, chapter_id: str, status: str, note: str = "") -> None:
+    """把收尾那两笔派出去，不让它拖住或拖垮这一条流。
+
+    生成器被取消（客户端断开、点了停止、服务端超时）时 finally 里再 await 会立刻重抛，写不进去 ——
     那正是最需要记下"这一轮断了"的时候。所以单独派个任务，数据从参数带过去，不依赖被取消的栈。
     """
-    task = asyncio.create_task(mark_settled(user_id, novel_id, status), name="novel-run-settle")
+    task = asyncio.create_task(
+        _settle(user_id, novel_id, chapter_id, status, note), name="novel-run-settle"
+    )
     _settle_tasks.add(task)
     task.add_done_callback(_settle_tasks.discard)
 
@@ -430,6 +463,7 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input, callbacks
         question = {}   # updates 流里接到的那个问题（{text, options}），另见 _final_payload
         settled = DONE  # 这一轮到哪儿收的尾：awaiting 停在等答复，done 是正常跑完
         finished = False
+        note = ""       # 这一轮没跑完时，补进对话历史的那句话（出错了才有值，中断走默认那句）
         try:
             # 开跑先盖章：断开时提示"上一轮中断了"认这个标记。章号先留空 —— 请求带上来的
             # chapter_id 只是"用户开着的那一章"，它可能压根不在这一轮要动的地方（闲聊那一路
@@ -443,7 +477,7 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input, callbacks
                 stream_mode=["messages", "tasks", "updates"],
                 subgraphs=True,
             )
-            async for item in with_heartbeat(events):
+            async for item in with_heartbeat(events, label="writer"):
                 if item is None:
                     # 图闷住了（intension / load 这类不流式的节点可能在跑），发一行注释把
                     # 连接的"空闲"消掉，免得中间代理按读超时把流掐了。
@@ -527,10 +561,19 @@ def _sse(*, user_id: str, novel_id: str, chapter_id: str, graph_input, callbacks
             yield _event("done", {})
             finished = True
         except Exception as e:  # 流已经开了，只能把错误当一条事件发出去
+            note = f"这一轮出错了，没能跑完，可以重新发一次：{e}"
             yield _event("error", {"message": str(e)})
         finally:
-            # 没走到 done 就是这一轮没跑完（断开 / 出错）—— 记成 cancelled，用户下次进来才知道。
-            _settle_later(user_id, novel_id, settled if finished else CANCELLED)
+            # 没走到 done 就是这一轮没跑完（断开 / 出错了 / 被掐 / 超时）—— run 账本记成 cancelled，
+            # 再往对话历史里补一句"中断了"：这一轮没有别的助手回话，不补的话用户回来只看得到
+            # 自己那句话，不知道发生了什么。
+            _settle_later(
+                user_id,
+                novel_id,
+                chapter_id,
+                settled if finished else CANCELLED,
+                "" if finished else note or "上一轮请求中断了，没能跑完，可以重新发一次。",
+            )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
@@ -574,7 +617,7 @@ async def call_novel_agent(
 
     用户这一轮挑中的灵感（inspirationIds，灵感库内已有行的 id）在过了这道门禁之后按 id 取回，
     随 state.inspirations 进图：**只取不落库** —— 灵感在灵感库新增时就入了库，对话这里只是
-    点名要用哪几条。取回的行带真 id，落章后 update 据此补 usedChapterIds。
+    点名要用哪几条。取回的行带真 id；用在哪几章由章节台账（novel_chapter_ref）记。
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="至少说一句要写什么")
@@ -602,6 +645,69 @@ async def call_novel_agent(
             "user_id": user_id,
             "user_message": text,
             "inspirations": selected,
+            # 显式清空：manual_content 是"人工改稿那一轮"的记号，上一轮残留会让这一轮被误判成人工改。
+            "manual_content": "",
+        },
+        callbacks=[handler] if handler else None,
+    )
+
+
+@router.post("/manual")
+async def manual_novel_agent(
+    request: Request,
+    novelId: str = Form(...),
+    chapterId: str = Form(...),
+    content: str = Form(...),
+):
+    """人工改稿：用户在正文框里改完点了保存，把这一章改后的正文交回图里重报台账、定级、审稿。
+
+    意图是确定的（就是改这一章），所以图里的 intension 见到 manual_content 直接短路、不调模型
+    （见 agents/novel/nodes/intension.py）—— 这一层只管把改后正文塞进 state。
+
+    开流之前先把能改的章节卡住：只有草稿 / 待修复能改（done 定稿、generating 生成中、临时章都不行），
+    这是与前端保存按钮置灰、editor.manual 的后端闸同一个口径的第二道闸 —— 前端能置灰，
+    接口不能只靠前端自觉。上一稿还停在确认上时先把那件事发回去（同 /run），别让新的改动盖掉它。
+
+    进图不带 "manual" 那种标记：那一趟走不走 manual 由 editor.prepare 自己按 manual_content 判
+    （父图 State 里根本没有 manual 这个通道，带了也是空操作）。
+    """
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="改后的正文不能是空的")
+
+    user_id = str(request.state.user_id)
+    chapter_id = (chapterId or "").strip()
+
+    pending = await _pending(user_id, novelId, chapter_id)
+    if pending.get("pending"):
+        return _sse_pending(novelId, pending)
+
+    if await get_chapter_status(novelId, chapter_id) not in _EDITABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail="已定稿或正在生成的章节不能改，只能改草稿与待修复的章节。",
+        )
+
+    handler = getattr(request.state, "token_collector", None)
+    return _sse(
+        user_id=user_id,
+        novel_id=novelId,
+        chapter_id=chapter_id,
+        graph_input={
+            "user_id": user_id,
+            "user_message": "",
+            "manual_content": content,
+            # 人工改稿是全新一轮，先把上一轮可能残留的记号清干净（口径同 update 的 fresh）。
+            # 上一轮要是被客户端断开 / 超时打断，update 没跑，那些记号就留在 thread 的 state 里：
+            # chapter_review 会让 reader 一进门就判"已有结论"、跳过整轮审稿，chapter_conflicts /
+            # change_impact / setting_changes 会被 update 当成这一轮的写回库，edit_feedback 会把
+            # 这一轮顶成 agent 回炉。稿数记 1：这一稿是用户自己写的手稿，不是回炉的第 N 稿。
+            "chapter_review": {},
+            "edit_feedback": "",
+            "chapter_conflicts": [],
+            "chapter_attempt": 1,
+            "change_grade": "",
+            "change_impact": [],
+            "setting_changes": [],
         },
         callbacks=[handler] if handler else None,
     )

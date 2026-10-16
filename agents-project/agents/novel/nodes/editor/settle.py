@@ -39,8 +39,10 @@ async def settle(state: EditorState, config: RunnableConfig) -> dict:
     label = TYPE_LABEL.get(target_type, target_type)
 
     if mode == "create":
-        # 大纲这类不在 NEW_ENTITY_SPEC 里的只能改、不能新增（开书时就定死了）。
-        if target_type not in NEW_ENTITY_SPEC:
+        # 大纲这类不在 NEW_ENTITY_SPEC 里的只能改、不能新增（开书时就定死了）；关系（writerOnly）
+        # 只能由写手在正文里造（两端角色认得出才连得上），这里也一律挡回。
+        spec = NEW_ENTITY_SPEC.get(target_type)
+        if spec is None or spec.get("writerOnly"):
             return {"plan": {}, "edit_note": f"【{label}】不能新增，只能改已有的那几条。"}
         # 新增的字段过 NEW_ENTITY_SPEC：白名单 + 缺列补默认值（status 就是这么补上的）。
         # 改的那条路走 EDIT_SPEC（不含 status），两条路用的白名单本就不是一份。

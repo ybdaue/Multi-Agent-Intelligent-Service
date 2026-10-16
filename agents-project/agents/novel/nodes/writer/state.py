@@ -26,6 +26,8 @@ class WriterOutput(TypedDict):
     chapter_review: ChapterReview
     chapter_attempt: int
     chapter_inspirations: list          # planner 定的本章灵感，交回父图给 reader / update
+    # 写新章恒无分级：带上空值清掉上一轮可能残留的 grade，否则这一章会被误判成 L1/L2 而少审。
+    change_grade: str
 
 
 class WriterState(TypedDict):
@@ -41,3 +43,4 @@ class WriterState(TypedDict):
     writer_context: dict                # resolve 预查的上下文，prepare 复用
     bundle: dict                        # prepare 备好的材料，planner / write 各取所需
     task_card: dict                     # planner 出的任务卡，拼进写手的开场白
+    change_grade: str                   # 写新章恒设空，清掉上一轮残留的分级标记

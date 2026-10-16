@@ -36,10 +36,16 @@ class ChapterMeta(TypedDict):
     # None = 这一稿没给台账（旧的关联一行不动）；[] = 明确说不涉及，换掉旧的。
     chapter_refs: Optional[List[dict]]   #本章用到的已有设定：[{refType, refId, role}]，落 novel_chapter_ref
     chapter_new: List[dict]              #本章新造的设定：[{refType, fields}]，先落各表再挂一条 ref
+    # 本章实际发生的设定变化（会变值那五类）：[{refType, refId, fields}]。落库时照旧行建一版新行
+    # （旧行的 next 指新行、新行的 firstAppearanceChapterId 钉本章），再把这章对旧版的 ref 重指到新版本行。writer 没报就是 []。
+    chapter_changed: List[dict]
     # 本章所处的阶段线 / 支线：[{level, id, action, content, parentId}]，level 是 phase / branch。
     # open 时 id 是代码预生成的新 id、parentId 挂父（阶段线→主线、支线→阶段线）；continue/close
     # 照抄目标 id。由 update 写进 novel_outline；writer 没报就是 []。
     chapter_lines: List[dict]
+    # 本章的大纲关联（阶段线 / 支线的 outline ref），由 collect 从 card 派生、代码落库：
+    # [{refType: "outline", refId, role}]。None = 这一稿不动大纲关联（改稿路径），保留上一稿的。
+    chapter_outline_refs: Optional[List[dict]]
 
 
 class ChapterTarget(TypedDict):
@@ -137,7 +143,7 @@ class State(MessagesState):
 
     # 这一轮用户在对话框里从灵感库挑中的灵感（/run 按 id 取回，完整行，带真 id）。
     # 每条 {id, title, category, type, content, usage, lifecycle, scenario, digest, usedChapterIds}：
-    # 只取不落库 —— 灵感入库在灵感库那边做，这里只是点名用哪几条，落章后据此补 usedChapterIds。
+    # 只取不落库 —— 灵感入库在灵感库那边做，这里只是点名用哪几条；用在哪几章由台账记。
     inspirations: List[dict]
     # 本章**最终选用**的灵感（planner 定：forced 必用 ∪ 本轮点名的那几条），带 how。
     # writer 照它的写作指引落笔，reader.style 逐条校验用没用上，update 落章后清空。
@@ -175,3 +181,9 @@ class State(MessagesState):
     named_chapter_order: Optional[int]
     setting_changes: List[SettingChange]
     change_impact: List[ChangeImpact]
+    # 这一稿改动的严重程度（L1 纯润色 / L2 局部事实 / L3 结构性，空 = 没分级）。人工改稿由
+    # editor.manual 判、agent 改稿随台账报，route_after_draft 据它决定 reader 走哪几路。
+    change_grade: str = ""
+    # 人工改稿时用户在保存按钮里提交的**改后正文**：只有"人工改这一章"那一轮非空，
+    # intension 见它就不调模型（意图是确定的），editor.manual 消费后清空。下一轮由 /run 显式置空。
+    manual_content: str = ""

@@ -1,7 +1,8 @@
 """开书六项的常量、落库形状与解析。
 
-哪几项、认不认得出来、怎么落库都定在这里，与 prompt 的标记格式同一口径。顺序**不是提问顺序** ——
-问哪一项由模型自己定（见 prompt.py），SETTING_FIELDS 只用来判定"六项齐了没"。
+哪几项、认不认得出来、怎么落库都定在这里，与 prompt 的标记格式同一口径。SETTING_FIELDS 的
+顺序就是**提问顺序**：六项是一条先后链（套路 → 风格 → 世界观 → 主角 → 核心冲突 → 书名），
+maintain 永远先问"最早的缺失项"（见 nodes.py），DEPENDENCIES 也由这个顺序推出来（见下）。
 
 标记块的【内容】有两种：主角与世界规则那两项是一段 JSON（键就是库里的列名，见 _STRUCTURED），
 其余四项是散文。JSON 那两项照 ledger 的 NEW_ENTITY_SPEC 归一 —— 开书造出来的主角、世界规则，
@@ -18,9 +19,9 @@ from ..utils.novel_information import render_protagonists
 SETTING_FIELDS: tuple[str, ...] = (
     "novel_tropes",
     "novel_style",
+    "novel_world_rules",
     "novel_protagonists",
     "novel_outlines",
-    "novel_world_rules",
     "novel_title",
 )
 
@@ -34,14 +35,15 @@ SETTING_LABELS: dict[str, str] = {
     "novel_world_rules": "世界观 / 等级力量体系",
 }
 
-# 设定项之间的依赖关系：键改动时，值列表里的项也受牵连需要重议。
-# 书名必须最后定，所以套路/世界观/主角/核心冲突改了 → 书名需要重议；
-# 套路是全局基调，改了 → 主角也要重议（人设/能力得贴合新的套路）。
+# 设定项之间的依赖关系：键改动时，值列表里的项受牵连、要清空重议。
+#
+# 六项是一条严格的先后链 —— 顺序就是 SETTING_FIELDS：套路 → 风格 → 世界观 → 主角 → 核心
+# 冲突 → 书名。排在前面的是基调，后面的都照着它往下落，所以改动任何一项，它**后面全部**
+# 都要跟着重议 —— 值列表就是"该字段之后的所有字段"。这里直接从 SETTING_FIELDS 生成：
+# 顺序一改，依赖跟着改，不会再出现"两处各写一份、悄悄对不上"的老毛病。
 DEPENDENCIES: dict[str, list[str]] = {
-    "novel_tropes": ["novel_protagonists", "novel_outlines", "novel_world_rules", "novel_title"],
-    "novel_world_rules": ["novel_outlines", "novel_title"],
-    "novel_protagonists": ["novel_outlines", "novel_title"],
-    "novel_outlines": ["novel_title"],
+    field: list(SETTING_FIELDS[index + 1:])
+    for index, field in enumerate(SETTING_FIELDS[:-1])
 }
 
 # 设定项的结构化子字段：键→{label, required}。

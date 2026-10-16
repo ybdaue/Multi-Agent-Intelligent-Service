@@ -12,19 +12,41 @@ ON CONFLICT 保证重跑不翻倍）。字段白名单与 ledger.py 认同一份
 """
 import uuid
 
-from ...utils.ledger import FACT_SKIP_COLUMNS, NEW_ENTITY_SPEC, TYPE_LABEL
+from ...utils.ledger import (
+    FACT_SKIP_COLUMNS,
+    NEW_ENTITY_SPEC,
+    TYPE_LABEL,
+    VERSION_TYPES,
+    tail_filter,
+    write_version_row,
+)
 
-# 能改的八类：七类照 NEW_ENTITY_SPEC（字段白名单同一份），大纲是外加的（不能新造但能改）。
+# 能改的九类：七类照 NEW_ENTITY_SPEC（字段白名单同一份），大纲、关系是外加的（不能新造但能改）。
+# 伏笔的 status 是 open / resolved（这条悬念收没收回），命根子在 writer 的收尾那条路（resolved 段），
+# 不给人手改；其余类型的 status 是审校状态（draft / done），跟名字 / 描述一样可改（物品面板上就摆着
+# 它，用户会说「把某件物品的状态改成…」）。
+_EDIT_SKIP = {"foreshadowing": ("status",)}
 EDIT_SPEC = {
     ref_type: {
         "table": spec["table"],
         "key": spec["key"],
-        "columns": [column for column in spec["columns"] if column not in FACT_SKIP_COLUMNS],
+        "columns": [column for column in spec["columns"] if column not in _EDIT_SKIP.get(ref_type, ())],
     }
     for ref_type, spec in NEW_ENTITY_SPEC.items()
 }
 # 大纲认身份那一列就是正文本身：改它等于重写这条大纲，所以它也一定走 name_ref 那条路。
 EDIT_SPEC["outline"] = {"table": "novel_outline", "key": "content", "columns": ["content"]}
+# 关系认身份那一列取 relationType（不在 _NAME_KEYS 里，所以不走正文 LIKE 那条路，只走
+# stale_value：改它 = 台账里报过这条关系的章要回头对）。两端是指向角色的 id：身份不是内容，
+# 改关系时不许动它们（见 _FROZEN_COLUMNS），摆清单时另换成人名让人认得出是哪两人的关系。
+EDIT_SPEC["relation"] = {
+    "table": "novel_relation",
+    "key": "relationType",
+    "columns": ["fromCharId", "toCharId", "relationType", "strength", "description"],
+}
+
+# 冻结列：这些列是"认身份"用的（关系两端），模型填了也不落库 —— 改的是内容，不是端点的身份。
+_FROZEN_COLUMNS = {"relation": ("fromCharId", "toCharId")}
 
 # 提示词里按这个顺序列给模型，跟 NEW_ENTITY_SPEC 一致，改起来好对。
 EDIT_TYPES = tuple(EDIT_SPEC)
@@ -48,6 +70,11 @@ _COLUMN_LABELS = {
     "rule": "规则内容",
     "year": "年份",
     "content": "内容",
+    "status": "状态",
+    "fromCharId": "源角色",
+    "toCharId": "目标角色",
+    "relationType": "关系类型",
+    "strength": "关系强度",
 }
 
 # 短到能当名字用、能拿去正文里做字面匹配的那几列。大纲的 content、伏笔的 description 是整段
@@ -94,10 +121,11 @@ def editable_fields(ref_type: str, fields) -> dict:
     spec = EDIT_SPEC.get(ref_type)
     if spec is None or not isinstance(fields, dict):
         return {}
+    frozen = _FROZEN_COLUMNS.get(ref_type, ())
     return {
         column: (" ".join(str(fields.get(column) or "").split()))
         for column in spec["columns"]
-        if column in fields
+        if column in fields and column not in frozen
     }
 
 
@@ -106,6 +134,7 @@ async def find_target(novel_id: str, ref_type: str, target_id: str, name: str) -
 
     id 优先，对不上就拿名字再查一遍（只有认身份那一列短的那几类查得，大纲与伏笔按名字查
     等于乱撞）。查不到就给 None，由调用方回一句"没找到"，不猜。
+    会变值的那几类只认**当前版（链尾）** —— 同名多版下，"改林默的能力"要改的是现在生效的那一版。
     """
     from api.utils.db import pg_pool
 
@@ -115,17 +144,18 @@ async def find_target(novel_id: str, ref_type: str, target_id: str, name: str) -
 
     columns = list(spec["columns"])
     select = ", ".join(f'"{column}"' for column in columns)
+    tail = tail_filter(ref_type, spec["table"])
 
     async with pg_pool.connection() as conn:
         cur = await conn.execute(
-            f'SELECT id, {select} FROM {spec["table"]} WHERE "novelId" = %s AND id = %s',
+            f'SELECT id, {select} FROM {spec["table"]} WHERE "novelId" = %s AND id = %s{tail}',
             (novel_id, target_id),
         )
         row = await cur.fetchone()
         if row is None and name and spec["key"] in _NAME_KEYS:
             cur = await conn.execute(
                 f'SELECT id, {select} FROM {spec["table"]} '
-                f'WHERE "novelId" = %s AND "{spec["key"]}" = %s LIMIT 1',
+                f'WHERE "novelId" = %s AND "{spec["key"]}" = %s{tail} LIMIT 1',
                 (novel_id, name),
             )
             row = await cur.fetchone()
@@ -133,6 +163,14 @@ async def find_target(novel_id: str, ref_type: str, target_id: str, name: str) -
     if row is None:
         return None
     return {"id": row[0], "fields": dict(zip(columns, row[1:]))}
+
+
+async def _char_names(conn, novel_id: str) -> dict[str, str]:
+    """人物 id → 姓名。关系的两端要换成人名，settle 才读得出是哪两人的关系。"""
+    cur = await conn.execute(
+        'SELECT id, name FROM novel_character WHERE "novelId" = %s', (novel_id,)
+    )
+    return {row[0]: row[1] for row in await cur.fetchall()}
 
 
 async def list_entries(novel_id: str, ref_type: str, hint: str = "") -> list[dict]:
@@ -154,11 +192,20 @@ async def list_entries(novel_id: str, ref_type: str, hint: str = "") -> list[dic
     async with pg_pool.connection() as conn:
         cur = await conn.execute(
             f'SELECT id, {select} FROM {spec["table"]} '
-            f'WHERE "novelId" = %s ORDER BY ("{spec["key"]}" = %s) DESC, "createdAt" LIMIT %s',
+            f'WHERE "novelId" = %s' + tail_filter(ref_type, spec["table"])
+            + f' ORDER BY ("{spec["key"]}" = %s) DESC, "createdAt" LIMIT %s',
             (novel_id, hint, MAX_ENTRIES),
         )
         rows = await cur.fetchall()
-    return [{"id": row[0], "fields": dict(zip(columns, row[1:]))} for row in rows]
+        names = await _char_names(conn, novel_id) if ref_type == "relation" else {}
+
+    entries = [{"id": row[0], "fields": dict(zip(columns, row[1:]))} for row in rows]
+    # 关系的两端是角色 id，模型读不出是谁：摆清单前换成人名（仅供展示；冻结列填了也不落库）。
+    for entry in entries:
+        for column in _FROZEN_COLUMNS.get(ref_type, ()):
+            char_id = str(entry["fields"].get(column) or "")
+            entry["fields"][column] = names.get(char_id, "（已删角色）") if char_id else ""
+    return entries
 
 
 def render_entries(ref_type: str, entries: list[dict]) -> str:
@@ -207,7 +254,8 @@ async def exists_by_key(novel_id: str, ref_type: str, identity: str) -> bool:
     这时候插一条重复的、或者盖到原来那条上，都不可接受，交调用方回一句让用户定。
     """
     spec = NEW_ENTITY_SPEC.get(ref_type)
-    if spec is None or not identity:
+    # 关系只有写手造得了（两端角色得在正文里认），editor 这一路没有造它的材料，见面就跳过。
+    if spec is None or spec.get("writerOnly") or not identity:
         return False
 
     from api.utils.db import pg_pool
@@ -413,7 +461,7 @@ async def collect_new_impact(novel_id: str, *, change_id: str, change_summary: s
     才做字面匹配，理由同 collect_impact。查不出来就是真空着，交给调用方照实回话。
     """
     spec = NEW_ENTITY_SPEC.get(ref_type)
-    if spec is None or spec["key"] not in _NAME_KEYS:
+    if spec is None or spec.get("writerOnly") or spec["key"] not in _NAME_KEYS:
         return []
 
     name = str(fields.get(spec["key"]) or "").strip()
@@ -570,7 +618,8 @@ async def _insert_setting(conn, novel_id: str, ref_type: str, fields: dict) -> b
     聊设定时加的，不挂在哪一章上，将来哪一章用到它，writer 的台账会自己补。
     """
     spec = NEW_ENTITY_SPEC.get(ref_type)
-    if spec is None:
+    # 关系只能由写手在正文里造（两端角色认得出才连得上），editor 的新增一律跳过。
+    if spec is None or spec.get("writerOnly"):
         return False
 
     key = spec["key"]
@@ -603,6 +652,9 @@ async def write_edits(novel_id: str, setting_changes: list[dict], impact_rows: l
     跑在自己的事务里，但跟章节那次写入不是一个事务：改章节那一轮的影响台账是附带的，
     它没落上不该把已经写好的章节一起带回去。fields 已在 editor 那边过了白名单
     （改的过 EDIT_SPEC，新增的过 NEW_ENTITY_SPEC，见 editor.settle）。
+
+    改的是会变值那五类时，不原地 UPDATE，而是记一版新行、把旧行的 next 接上（见
+    ledger.write_version_row），跟 writer 报 changed 走的是同一套版本链。
     """
     from api.utils.db import pg_pool
 
@@ -618,6 +670,12 @@ async def write_edits(novel_id: str, setting_changes: list[dict], impact_rows: l
                     continue
                 spec = EDIT_SPEC.get(ref_type)
                 if spec is None:
+                    continue
+                if ref_type in VERSION_TYPES:
+                    # 会变值那五类：改一条 = 给它的当前版记一版新行、旧行的 next 指向新行（版本链
+                    # 由代码接，不由模型报）。旧版本原样留着，用户能看到它一路怎么变的；改成原地
+                    # UPDATE 就等于把这一版的历史抹掉了。editor 改的设定没挂在哪一章上，章节列留空。
+                    await write_version_row(conn, novel_id, ref_type, change["refId"], fields, None)
                     continue
                 columns = [column for column in spec["columns"] if column in fields]
                 if not columns:

@@ -117,7 +117,7 @@ def _sse(*, user_id: str, novel_id: str, graph_input, callbacks: Optional[list] 
                 graph_input, _config(user_id, novel_id, callbacks), stream_mode=["messages", "updates"],
                 subgraphs=True,
             )
-            async for item in with_heartbeat(events):
+            async for item in with_heartbeat(events, label="setup"):
                 if item is None:
                     # 图闷住了（maintain 这类不流式的节点可能在跑），发一行注释把连接
                     # 的"空闲"消掉，免得中间代理按读超时把流掐了。

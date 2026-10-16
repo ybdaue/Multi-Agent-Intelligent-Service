@@ -11,9 +11,12 @@ from .style import style
 
 
 def _route_after_gather(state: ReaderState):
-    """gather 之后的去路：守卫拦下（无新稿）就收工，否则三路并行审。"""
+    """gather 之后的去路：守卫拦下（无新稿）就收工；否则按这一稿的严重程度挑审哪几路 ——
+    L2（改了局部事实）只查连贯性与人物设定（logic + pacing），L3 / 没分级走三路全审。"""
     if state.get("chapter_review"):
         return END
+    if state.get("change_grade") == "L2":
+        return ["logic", "pacing"]
     return ["logic", "pacing", "style"]
 
 

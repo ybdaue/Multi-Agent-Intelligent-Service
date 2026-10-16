@@ -13,7 +13,8 @@
 .dialog {
   width: 100%;
   max-width: 32rem;
-  max-height: 100%;
+  /* 只占 80vh：弹窗在整屏里居中，100% 会让顶部长到页面顶部 60px 导航栏底下被压住（见 InspirationPicker） */
+  max-height: 80vh;
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-lg);

@@ -8,7 +8,10 @@ export interface PanelField {
   label: string;
   /** 长文本：另起一行铺满，不跟别的字段挤在一起 */
   block?: boolean;
-  /** 值怎么显示，默认照原样转字符串；空值一律不显示 */
+  /**
+   * 值怎么显示，默认照原样转字符串；空值由面板统一补占位（`暂无`，见 index.tsx），
+   * 要更贴切的就自己给（如持有者空值显示「无主」）
+   */
   format?: (value: unknown, row: Row) => string;
 }
 
@@ -22,9 +25,29 @@ export interface PanelSpec {
   fields: PanelField[];
   /** 一条都没记时的提示 */
   empty: string;
+  /**
+   * 这张表是「会随剧情演变的设定」：每变一次新建一行，旧行的 next 指向新行。
+   * 置了就在面板里按 next 串链、只摆当前版，多版的收起「变化轨迹」按钮（见 index.tsx / chains.ts）。
+   */
+  versioned?: boolean;
 }
 
 const text = (value: unknown) => (value == null ? "" : String(value));
+
+/** 值转成能显示的一串：数组拼顿号，空值给空串（空值的占位在渲染那步统一补）。 */
+export function display(value: unknown): string {
+  if (Array.isArray(value)) return value.length ? value.join("、") : "";
+  if (value == null || value === "") return "";
+  return String(value);
+}
+
+/** 字段值为空时统一显示这个占位：标签照常显示，整条不藏 —— 免得用户以为这项没记。 */
+export const EMPTY_PLACEHOLDER = "暂无";
+
+/** 按 spec 把一个字段渲染成给用户看的字（空值不在这里补，由调用方统一补占位）。 */
+export function fieldText(field: PanelField, row: Row): string {
+  return field.format ? field.format(row[field.key], row) : display(row[field.key]);
+}
 
 /** 正文里换行、空格都可能是随手敲的，标题只取一段干净的开头 */
 function head(value: unknown, limit = 24) {
@@ -35,6 +58,10 @@ function head(value: unknown, limit = 24) {
 /** 设定行上的 status 存的是枚举裸值，摆给用户看要翻成中文；认不出的原样给出去 */
 const STATUS_LABELS: Record<string, string> = { draft: "草稿", done: "定稿" };
 const status = (value: unknown) => STATUS_LABELS[text(value)] ?? text(value);
+
+/** 伏笔的 status 不走上面那套审校状态，只表达"收没收回"：两值 open / resolved。 */
+const FORESHADOW_STATUS_LABELS: Record<string, string> = { open: "未收尾", resolved: "已收尾" };
+const foreshadowStatus = (value: unknown) => FORESHADOW_STATUS_LABELS[text(value)] ?? text(value);
 
 /** 大纲的分级裸值：主线 / 阶段线 / 支线（旧行没标 level 的一律是主线）。 */
 const LINE_LEVEL_LABELS: Record<string, string> = { main: "主线", phase: "阶段线", branch: "支线" };
@@ -52,6 +79,7 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
     fields: [
       { key: "level", label: "分级", format: lineLevel },
       { key: "status", label: "状态", format: status },
+      { key: "startChapter", label: "起始章节" },
       { key: "content", label: "内容", block: true },
     ],
     empty: "这本书还没有大纲",
@@ -71,9 +99,11 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
       { key: "ability", label: "能力" },
       { key: "birthYear", label: "出生年份" },
       { key: "deathYear", label: "死亡年份" },
+      { key: "firstAppearanceChapter", label: "首次出现章节" },
       { key: "description", label: "描述", block: true },
     ],
     empty: "这本书还没有人物",
+    versioned: true,
   },
   world: {
     endpoint: "world-rules",
@@ -81,9 +111,11 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
     title: (row) => text(row.name) || "未命名规则",
     fields: [
       { key: "status", label: "状态", format: status },
+      { key: "firstAppearanceChapter", label: "首次出现章节" },
       { key: "rule", label: "规则内容", block: true },
     ],
     empty: "这本书还没有世界观设定",
+    versioned: true,
   },
   timeline: {
     endpoint: "timelines",
@@ -92,6 +124,7 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
     fields: [
       { key: "year", label: "年份" },
       { key: "status", label: "状态", format: status },
+      { key: "startChapter", label: "起始章节" },
       { key: "description", label: "描述", block: true },
     ],
     empty: "这本书还没有世界线",
@@ -104,9 +137,11 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
       { key: "type", label: "类型" },
       { key: "location", label: "所在地" },
       { key: "stance", label: "立场" },
+      { key: "firstAppearanceChapter", label: "首次出现章节" },
       { key: "description", label: "描述", block: true },
     ],
     empty: "这本书还没有势力阵营",
+    versioned: true,
   },
   chronicle: {
     endpoint: "chronicles",
@@ -114,6 +149,7 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
     title: (row) => text(row.title) || "未命名事件",
     fields: [
       { key: "year", label: "年份" },
+      { key: "startChapter", label: "起始章节" },
       { key: "content", label: "内容", block: true },
     ],
     empty: "这本书还没有编年史",
@@ -125,19 +161,22 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
     fields: [
       { key: "type", label: "类型" },
       { key: "status", label: "状态", format: status },
-      { key: "ownerName", label: "持有者" },
+      { key: "ownerName", label: "持有者", format: (value) => text(value) || "无主" },
+      { key: "firstAppearanceChapter", label: "首次出现章节" },
       { key: "description", label: "描述", block: true },
     ],
     empty: "这本书还没有物品设定",
+    versioned: true,
   },
   foreshadowing: {
     endpoint: "foreshadowings",
     listKey: "foreshadowings",
     title: (row) => head(row.description) || "伏笔",
     fields: [
-      { key: "status", label: "状态", format: status },
+      { key: "status", label: "状态", format: foreshadowStatus },
       { key: "plantedChapter", label: "埋设章节" },
       { key: "resolvedChapter", label: "回收章节" },
+      { key: "resolveScenario", label: "收尾场景", block: true },
       { key: "description", label: "描述", block: true },
     ],
     empty: "这本书还没有伏笔",
@@ -150,8 +189,10 @@ export const PANEL_SPECS: Partial<Record<WorkTab, PanelSpec>> = {
       { key: "relationType", label: "关系" },
       { key: "strength", label: "强度" },
       { key: "status", label: "状态", format: status },
+      { key: "firstAppearanceChapter", label: "首次出现章节" },
       { key: "description", label: "描述", block: true },
     ],
     empty: "这本书还没有人物关系",
+    versioned: true,
   },
 };

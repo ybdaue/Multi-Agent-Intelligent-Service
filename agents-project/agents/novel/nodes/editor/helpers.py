@@ -15,6 +15,19 @@ except Exception:
     _editModel_backup = None
     _revise_main = None
 
+# 人工改稿那一步：比对两稿 + 报台账 + 定严重程度，是"照材料下判词"，不出正文。跟审稿员一样
+# 关掉 thinking（deepseek-v4.1-flash 默认开，隐藏推理 token 按输出计费、也按输出计时）。
+try:
+    _manual_main = MainModel(
+        temperature=0.1, disable_streaming=True, extra_body={"enable_thinking": False}
+    )
+    _manual_backup = BackupMainModel(
+        temperature=0.1, disable_streaming=True, extra_body={"enable_thinking": False}
+    )
+except Exception:
+    _manual_main = None
+    _manual_backup = None
+
 
 def _is_chapter(state: EditorState) -> bool:
     return (state.get("plan") or {}).get("targetType") == "chapter"
@@ -152,6 +165,28 @@ def _revise_brief(state: EditorState, plan: dict, draft: dict, context: dict, or
     return "\n\n".join(lines)
 
 
+def _manual_brief(state: EditorState, original: str, refs_text: str, catalog: str) -> str:
+    """交给人工改稿那一步的：本章原稿 + 用户改后的稿 + 上一版台账 + 设定目录。
+
+    两稿是主角，摆清"原稿"与"改后稿"各是哪一段 —— 模型判 grade 靠的就是两者的差异。
+    """
+    lines = ["用户在正文框里亲手改了下面这一章：请比对两稿、重报这一章的台账，并定这次改动的严重程度。"]
+
+    if catalog.strip():
+        lines.append(
+            "库里已有的设定目录（每行是「id 名字」，refs / changed 的 refId 照它给）：\n\n"
+            + catalog
+        )
+    if refs_text.strip():
+        lines.append(
+            "这一章上一版记过的台账（供参考；改后稿里不再用到的就不必报了）：\n\n" + refs_text
+        )
+
+    lines.append(f"【本章原稿】\n\n{original}")
+    lines.append(f"【用户改后的稿】\n\n{(state.get('manual_content') or '').strip()}")
+    return "\n\n".join(lines)
+
+
 def _setting_notes(old_fields: dict, fields: dict) -> list[str]:
     """给人看的"改了哪几列"：旧值 → 新值，一行一列。"""
     lines = []
@@ -208,7 +243,8 @@ async def _new_setting(
     spec = NEW_ENTITY_SPEC.get(target_type)
     fields = plan.get("fields") or {}
     label = TYPE_LABEL.get(target_type, target_type)
-    if spec is None or not fields:
+    # 关系只能由写手在正文里造（两端角色认得出才连得上），editor 这一路不当它是可新增的设定。
+    if spec is None or spec.get("writerOnly") or not fields:
         return {"plan": {}, "edit_note": f"没看出要新增的是哪一条{label}。"}
 
     name = str(fields.get(spec["key"]) or "").strip() or str(plan.get("targetName") or "").strip()

@@ -11,7 +11,6 @@ from langchain_core.runnables import RunnableConfig
 from ..state import State
 from ..utils.chapter_information import count_chapter_words, upsert_chapter
 from .utils.impact import write_edits
-from ..utils.inspiration import mark_used
 
 
 async def update(state: State, config: RunnableConfig) -> dict:
@@ -25,6 +24,10 @@ async def update(state: State, config: RunnableConfig) -> dict:
         "edit_note": "",
         "setting_changes": [],
         "change_impact": [],
+        # 这一稿的严重程度与人工改稿的改后正文都是"本轮记号"：不带上下一轮，否则新章会被
+        # 上一轮的 grade 误判成 L1/L2 而少审、下一轮会被残留的 manual_content 误判成人工改。
+        "change_grade": "",
+        "manual_content": "",
         "target_chapter": {},
         # 灵感只在灵感库那边入库，这里只清本轮记号；哪几章用了哪几条由下面 mark_used 补。
         "inspirations": [],
@@ -62,10 +65,8 @@ async def update(state: State, config: RunnableConfig) -> dict:
         chapter["chapter_word_count"] = count_chapter_words(chapter["chapter_content"])
         chapter_id, _ = await upsert_chapter(novel_id, chapter)
 
-        # 这一章用到的灵感：写新章用 planner 定下的 chapter_inspirations（含必用 / 风格 / 用户点名）；
-        # 改章 / editor 那一路没有它，退回本轮用户点名的 inspirations。记进那几条的 usedChapterIds。
-        used = state.get("chapter_inspirations") or state.get("inspirations") or []
-        await mark_used([item["id"] for item in used if item.get("id")], chapter_id)
+        # 这一章用到的灵感已经随台账落进 novel_chapter_ref（writer / editor 在 refs 里报的那几条），
+        # 「用在哪些章」由那里派生，不再单独回写。
 
         # 改既有章节和写新章用词不一样：用户这一轮要的是"改"，回他"已写好"像答错了。
         verb = "已改好" if state.get("intension") == "edit" else "已写好"

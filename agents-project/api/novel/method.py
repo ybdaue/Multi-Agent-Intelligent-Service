@@ -32,8 +32,9 @@ from agents.novel.utils.inspiration import (
     parse_items,
     reconcile_inspirations,
     translate,
+    used_chapters,
 )
-from agents.novel.utils.ledger import TYPE_LABEL
+from agents.novel.utils.ledger import RELATION_NAME_SQL, TYPE_LABEL
 from agents.novel.utils.run_state import RUNNING, read_run
 from api.utils.db import pg_pool
 
@@ -44,6 +45,8 @@ router = APIRouter(prefix="/api/novel/method", tags=["小说服务"])
 # 就见不到内容。分类顺序也照 CATALOG，前端据此排分组。
 _NAME_COLUMN = {
     "character": ("novel_character", '"name"'),
+    # 关系认名字的是两端角色拼出来的一串（"林默→苏晚 师徒"），与目录共用同一份表达式。
+    "relation": ("novel_relation", RELATION_NAME_SQL),
     "faction": ("novel_faction", '"name"'),
     "item": ("novel_item", '"name"'),
     "world_rule": ("novel_world_rule", '"name"'),
@@ -122,22 +125,25 @@ async def _require_novel(conn, novel_id: str, user_id: str) -> None:
 # 表结构加了列不会莫名其妙地漏到前端去。
 _COLUMNS: dict[str, tuple[str, ...]] = {
     "novel_outline": ("id", "level", "content", "status", "parentId", "startChapterId",
-                      "endChapterId", "order"),
+                      "completed", "order"),
+    # 会随剧情演变的五类（人物 / 世界规则 / 势力 / 物品 / 关系）带上 next：版本链的自引用指针，
+    # 旧行的 next 指向新行、next 为空的那行是当前版。前端照它把同名多版串成"变化轨迹"。
     "novel_character": ("id", "name", "sex", "age", "birthYear", "deathYear", "description",
-                        "identity", "personality", "ability", "role"),
-    "novel_world_rule": ("id", "name", "rule", "status", "startChapterId", "endChapterId"),
-    "novel_timeline": ("id", "title", "status", "year", "description",
-                       "startChapterId", "endChapterId"),
-    "novel_faction": ("id", "name", "type", "location", "description", "stance"),
-    "novel_chronicle": ("id", "title", "year", "content"),
+                        "identity", "personality", "ability", "role",
+                        "firstAppearanceChapterId", "next"),
+    "novel_world_rule": ("id", "name", "rule", "status", "firstAppearanceChapterId", "next"),
+    "novel_timeline": ("id", "title", "status", "year", "description", "startChapterId"),
+    "novel_faction": ("id", "name", "type", "location", "description", "stance",
+                      "firstAppearanceChapterId", "next"),
+    "novel_chronicle": ("id", "title", "year", "content", "startChapterId"),
     "novel_item": ("id", "name", "type", "description", "firstAppearanceChapterId",
-                   "status", "ownerId"),
+                   "status", "ownerId", "next"),
     "novel_relation": ("id", "fromCharId", "toCharId", "relationType", "strength",
-                       "description", "startChapterId", "endChapterId", "status"),
-    "novel_foreshadowing": ("id", "description", "status", "plantedChapterId",
-                            "resolvedChapterId"),
+                       "description", "status", "firstAppearanceChapterId", "next"),
+    "novel_foreshadowing": ("id", "description", "resolveScenario", "status",
+                            "plantedChapterId", "resolvedChapterId"),
     "novel_inspiration": ("id", "sourceId", "title", "category", "type", "content", "usage",
-                          "lifecycle", "scenario", "digest", "usedChapterIds"),
+                          "lifecycle", "scenario", "digest"),
 }
 
 
@@ -165,14 +171,29 @@ async def _char_names(conn, novel_id: str) -> dict[str, str]:
 
 
 async def _chapter_names(conn, novel_id: str) -> dict[str, str]:
-    """章节 id → "第N章 标题"。伏笔的埋设 / 回收章节要给人看，给个 cuid 前端没法显示。"""
+    """章节 id → 章名。伏笔的埋设 / 回收章节要给人看，给个 cuid 前端没法显示。
+
+    novel_chapter.title 存的就是正文里那行标题（`# 第X章 睁眼是三天前`，见 split_title），
+    章号已经在标题里了 —— 再拼一次 order 就成了「第1章 第一章 睁眼是三天前」。所以有标题就
+    直接用，只在没标题时拿序号兜底。
+    """
     cur = await conn.execute(
         'SELECT id, "order", title FROM novel_chapter WHERE "novelId" = %s', (novel_id,)
     )
     return {
-        row[0]: (f"第{row[1]}章 {row[2]}".strip() if row[2] else f"第{row[1]}章")
+        row[0]: (str(row[2]).strip() if row[2] else f"第{row[1]}章")
         for row in await cur.fetchall()
     }
+
+
+def _fill_chapter_field(rows: list[dict], chapters: dict[str, str], column: str, field: str) -> None:
+    """把章节 id 列换成"第N章 标题"挂到展示字段上（见 _chapter_names），给前端直接显示。
+
+    column 是库里那列（firstAppearanceChapterId / startChapterId），field 是返回体的键
+    （firstAppearanceChapter / startChapter）。空值 / 章节已删一律给空串，前端补"暂无"。
+    """
+    for row in rows:
+        row[field] = chapters.get(row.get(column) or "", "")
 
 
 async def _ref_names(conn, novel_id: str, refs: list[tuple]) -> dict[tuple[str, str], str]:
@@ -298,6 +319,8 @@ async def list_outlines(request: Request, threadId: str):
     async with pg_pool.connection() as conn:
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_outline", threadId, '"order", "createdAt", id')
+        chapters = await _chapter_names(conn, threadId) if rows else {}
+    _fill_chapter_field(rows, chapters, "startChapterId", "startChapter")
     return {"threadId": threadId, "total": len(rows), "outlines": rows}
 
 
@@ -307,6 +330,8 @@ async def list_characters(request: Request, threadId: str):
     async with pg_pool.connection() as conn:
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_character", threadId, '"role", "createdAt", id')
+        chapters = await _chapter_names(conn, threadId) if rows else {}
+    _fill_chapter_field(rows, chapters, "firstAppearanceChapterId", "firstAppearanceChapter")
     return {"threadId": threadId, "total": len(rows), "characters": rows}
 
 
@@ -316,6 +341,8 @@ async def list_world_rules(request: Request, threadId: str):
     async with pg_pool.connection() as conn:
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_world_rule", threadId, '"createdAt", id')
+        chapters = await _chapter_names(conn, threadId) if rows else {}
+    _fill_chapter_field(rows, chapters, "firstAppearanceChapterId", "firstAppearanceChapter")
     return {"threadId": threadId, "total": len(rows), "worldRules": rows}
 
 
@@ -325,6 +352,8 @@ async def list_timelines(request: Request, threadId: str):
     async with pg_pool.connection() as conn:
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_timeline", threadId, '"year", "createdAt", id')
+        chapters = await _chapter_names(conn, threadId) if rows else {}
+    _fill_chapter_field(rows, chapters, "startChapterId", "startChapter")
     return {"threadId": threadId, "total": len(rows), "timelines": rows}
 
 
@@ -334,6 +363,8 @@ async def list_factions(request: Request, threadId: str):
     async with pg_pool.connection() as conn:
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_faction", threadId, '"createdAt", id')
+        chapters = await _chapter_names(conn, threadId) if rows else {}
+    _fill_chapter_field(rows, chapters, "firstAppearanceChapterId", "firstAppearanceChapter")
     return {"threadId": threadId, "total": len(rows), "factions": rows}
 
 
@@ -343,6 +374,8 @@ async def list_chronicles(request: Request, threadId: str):
     async with pg_pool.connection() as conn:
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_chronicle", threadId, '"year", "createdAt", id')
+        chapters = await _chapter_names(conn, threadId) if rows else {}
+    _fill_chapter_field(rows, chapters, "startChapterId", "startChapter")
     return {"threadId": threadId, "total": len(rows), "chronicles": rows}
 
 
@@ -353,9 +386,11 @@ async def list_items(request: Request, threadId: str):
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_item", threadId, '"createdAt", id')
         names = await _char_names(conn, threadId) if rows else {}
+        chapters = await _chapter_names(conn, threadId) if rows else {}
 
     for row in rows:
         row["ownerName"] = names.get(row.get("ownerId") or "", "")
+    _fill_chapter_field(rows, chapters, "firstAppearanceChapterId", "firstAppearanceChapter")
     return {"threadId": threadId, "total": len(rows), "items": rows}
 
 
@@ -366,10 +401,12 @@ async def list_relations(request: Request, threadId: str):
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_relation", threadId, '"createdAt", id')
         names = await _char_names(conn, threadId) if rows else {}
+        chapters = await _chapter_names(conn, threadId) if rows else {}
 
     for row in rows:
         row["fromName"] = names.get(row.get("fromCharId") or "", "")
         row["toName"] = names.get(row.get("toCharId") or "", "")
+    _fill_chapter_field(rows, chapters, "firstAppearanceChapterId", "firstAppearanceChapter")
     return {"threadId": threadId, "total": len(rows), "relations": rows}
 
 
@@ -392,10 +429,18 @@ async def list_foreshadowings(request: Request, threadId: str):
 
 @router.get("/inspirations")
 async def list_inspirations(request: Request, threadId: str):
-    """灵感库标签页：跨章的构思，usedChapterIds 是它已经用在哪些章。"""
+    """灵感库标签页：跨章的构思，usedChapterIds 是它已经用在哪些章。
+
+    usedChapterIds 不再入库，由台账（novel_chapter_ref）派生 —— 字段名不变，前端零改动。
+    """
     async with pg_pool.connection() as conn:
         await _require_novel(conn, threadId, request.state.user_id)
         rows = await _rows(conn, "novel_inspiration", threadId, '"createdAt", id')
+        used = await used_chapters(conn, threadId)
+    for row in rows:
+        ids = used.get(row["id"], [])
+        row["usedChapterIds"] = ids
+        row["used"] = bool(ids)
     return {"threadId": threadId, "total": len(rows), "inspirations": rows}
 
 

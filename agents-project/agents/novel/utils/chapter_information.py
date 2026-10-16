@@ -11,7 +11,16 @@ import json
 import re
 import uuid
 
-from .ledger import CATALOG, CATALOG_SQL, TITLE_LINE, render_catalog, write_ledger, write_lines
+from .ledger import (
+    CATALOG,
+    CATALOG_SQL,
+    TITLE_LINE,
+    render_catalog,
+    tail_filter,
+    write_ledger,
+    write_lines,
+    write_outline_refs,
+)
 
 # 番茄最佳阅读长度，writer 照这个写，reader 审稿时按这个卡字数。
 CHAPTER_MIN_WORDS = 2200
@@ -39,25 +48,32 @@ PREV_CHAPTERS_SQL = (
     'WHERE "novelId" = %s AND "order" < %s ORDER BY "order" DESC LIMIT 2'
 )
 
-# 大纲 / 世界规则用 startChapterId / endChapterId 圈生效区间，两列存的是章节 id，要比就得
-# 解析回 order（调用方给的是"下一章的序号"，那一章还没有 id）。区间为空 = 整本通用；
-# 左连接落空（没设，或指向的章已删）都按「不限」处理，不让一处悬空把整条大纲都挡掉。
+# 大纲用 startChapterId 圈起点、用 completed 判「还在不在写」（收尾即置 true）——两列存的是章节 id，
+# 要比就得解析回 order（调用方给的是"下一章的序号"，那一章还没有 id）。起点为空、或左连接落空
+# （没设，或指向的章已删）都按「不限起点」处理，不让一处悬空把整条大纲都挡掉。
 # level 区分主线 / 阶段线 / 支线；parentId 表达包含关系（阶段线挂主线、支线挂阶段线，
-# 主线为空）；start_order 是起始章的序号，阶段线 / 支线靠它算「已经写了几章」。
+# 主线为空）；sc."order" 是起始章的序号，阶段线 / 支线靠它算「已经写了几章」。
+# 第二个 OR 兜一个边界：重写旧章时，若这一章自己 ref 过某条线（可能正是它收尾的那条），
+# 也得把它当作「本章涉及的线」给 planner —— 否则收尾章被 completed 排除，planner 会新开重复线。
 OUTLINES_SQL = (
     'SELECT o.id, o.level, o.content, o."parentId", sc."order" FROM novel_outline o '
     'LEFT JOIN novel_chapter sc ON sc.id = o."startChapterId" '
-    'LEFT JOIN novel_chapter ec ON ec.id = o."endChapterId" '
-    'WHERE o."novelId" = %s AND (sc."order" IS NULL OR sc."order" <= %s) '
-    'AND (ec."order" IS NULL OR ec."order" >= %s) ORDER BY o."order"'
+    'WHERE o."novelId" = %s AND ('
+    '(NOT o."completed" AND (sc."order" IS NULL OR sc."order" <= %s)) '
+    'OR o.id IN ('
+    'SELECT r."refId" FROM novel_chapter_ref r WHERE r."chapterId" = ('
+    'SELECT c.id FROM novel_chapter c WHERE c."novelId" = %s AND c."order" = %s'
+    ') AND r."refType" = \'outline\'::"RefType")'
+    ') ORDER BY o."order"'
 )
 
+# 世界规则会随剧情改写：本章生效的是该规则的**链尾（当前版，next 为空的那一行）**。不再有
+# startChapterId / endChapterId 圈区间 —— 每条版本行自带的 firstAppearanceChapterId 记它从哪一章起
+# 出现，旧版只在它绑过的那几章反查得到。写新章时直接给链尾那一条（写手照它落笔）。
 WORLD_RULES_SQL = (
     'SELECT r.name, r.rule FROM novel_world_rule r '
-    'LEFT JOIN novel_chapter sc ON sc.id = r."startChapterId" '
-    'LEFT JOIN novel_chapter ec ON ec.id = r."endChapterId" '
-    'WHERE r."novelId" = %s AND (sc."order" IS NULL OR sc."order" <= %s) '
-    'AND (ec."order" IS NULL OR ec."order" >= %s) ORDER BY r."createdAt"'
+    'WHERE r."novelId" = %s' + tail_filter("world_rule", "novel_world_rule", outer="r")
+    + ' ORDER BY r."createdAt"'
 )
 
 # novel_chapter 上 (novelId, order) 唯一，按这两个键 upsert：同一章重跑不会插出两行。
@@ -151,6 +167,11 @@ CHAPTER_ORDER_BY_ID_SQL = (
     'SELECT id, "order" FROM novel_chapter WHERE "novelId" = %s AND id = %s'
 )
 
+# 人工改稿的接口在开流前按 id 取这一章的状态，判断能不能改。
+CHAPTER_STATUS_BY_ID_SQL = (
+    'SELECT status FROM novel_chapter WHERE "novelId" = %s AND id = %s'
+)
+
 
 async def _next_order(conn, novel_id: str) -> int:
     cur = await conn.execute(NEXT_ORDER_SQL, (novel_id,))
@@ -208,6 +229,20 @@ async def get_chapter_order(novel_id: str, chapter_id: str) -> int | None:
     return row[1] if row else None
 
 
+async def get_chapter_status(novel_id: str, chapter_id: str) -> str | None:
+    """按章节 id 取它的状态（draft / fixing / done …），库里没有就给 None。
+
+    人工改稿的接口据此在开流**之前**拦一道：只有草稿与待修复能改（与前端保存按钮置灰、
+    editor.manual 的后端闸同一个口径）。本地新建还没落库的章取不到状态，那也是 None，一并当作不可改。
+    """
+    from api.utils.db import pg_pool
+
+    async with pg_pool.connection() as conn:
+        cur = await conn.execute(CHAPTER_STATUS_BY_ID_SQL, (novel_id, chapter_id))
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
 async def next_chapter_order(novel_id: str) -> int:
     """这本书下一章该用的序号（最大序号 + 1），还没有章节就是 1。"""
     from api.utils.db import pg_pool
@@ -217,10 +252,10 @@ async def next_chapter_order(novel_id: str) -> int:
 
 
 async def get_writer_context(novel_id: str, order: int | None = None) -> dict:
-    """动笔前要备齐的材料：本章序号、前文、本章生效的大纲与世界规则、已有设定目录。
+    """动笔前要备齐的材料：本章序号、前文、本章生效的大纲与当前世界规则、已有设定目录。
 
     不传 order 就是"下一章"（writer 写新章）；改已有章节传目标序号 —— "上一章"该是它前面
-    那一章，大纲与世界规则也要按它当时生效的那几条取。前文没有就是空串 / 空 dict。
+    那一章，大纲也要按它当时生效的那几条取（世界规则只给链尾当前版，不分章）。前文没有就是空串 / 空 dict。
     大纲按 level 分成主线段（main_outlines）、阶段线段（phase_lines）、支线段（branch_lines），
     支线带 start_order，供 planner 算它已经写了几章。阶段线 / 支线各带 parent_id（阶段线挂主线、
     支线挂阶段线），main_line_id 是主线的 id，供 planner 新开阶段线时挂父。prev_summary 是上一章
@@ -250,7 +285,7 @@ async def get_writer_context(novel_id: str, order: int | None = None) -> dict:
         # 大纲按 level 拆开：主线当脉，阶段线是这一段主线要推进的方向，支线是当前那个临时小剧情。
         # parentId 带着包含关系：阶段线挂主线、支线挂阶段线。main_line_id 取第一条主线的 id，
         # 供 writer 新开阶段线时挂父（setup 收的「核心冲突」暂只一条）。
-        cur = await conn.execute(OUTLINES_SQL, (novel_id, order, order))
+        cur = await conn.execute(OUTLINES_SQL, (novel_id, order, novel_id, order))
         main_outlines = []
         main_line_id = ""
         phase_lines = []
@@ -270,7 +305,7 @@ async def get_writer_context(novel_id: str, order: int | None = None) -> dict:
                 if not main_line_id:
                     main_line_id = outline_id
 
-        cur = await conn.execute(WORLD_RULES_SQL, (novel_id, order, order))
+        cur = await conn.execute(WORLD_RULES_SQL, (novel_id,))
         world_rules = [
             {"name": name or "", "rule": _clip(rule, MAX_RULE_CHARS)}
             for name, rule in await cur.fetchall()
@@ -300,8 +335,10 @@ async def upsert_chapter(novel_id: str, chapter: dict) -> tuple[str, int]:
     """把一章写进 novel_chapter，顺带刷新全书总字数、落这一章的台账（关联 + 阶段线/支线）。
 
     入参是 ChapterMeta 那份 dict，字数落库前调用方要自己算好。
-    四笔同一事务：总字数没跟上前端就对不上，台账没跟上将来改设定就查不出这一章用了什么；
-    台账要 chapter_id，所以排在章节插入之后。
+    同事务几笔：总字数没跟上前端就对不上，台账没跟上将来改设定就查不出这一章用了什么。
+    顺序要紧：先写 novel_chapter（拿 id），再落 novel_outline 行（write_lines），然后落模型报的
+    refs（write_ledger），最后落代码生成的大纲 ref（write_outline_refs）—— outline ref 指向 line
+    行 id，必须等行先存在。
 
     已存在的章不会被改标题（见 UPSERT_SQL 上面那段）：用户改过的章名以库里那份为准。
     """
@@ -327,20 +364,33 @@ async def upsert_chapter(novel_id: str, chapter: dict) -> tuple[str, int]:
             row = await cur.fetchone()
             chapter_id = row[0]
 
-            await write_ledger(
-                conn,
-                novel_id,
-                chapter_id,
-                chapter.get("chapter_refs"),
-                chapter.get("chapter_new"),
-            )
-
+            # 先落 / 改 novel_outline 行，再落 ref —— outline ref 指向的是 line 行 id，
+            # write_ledger 里的 _live_ids 会核它是否真存在，ref 早落会被静默丢掉。
             await write_lines(
                 conn,
                 novel_id,
                 chapter_id,
                 chapter.get("chapter_order") or 0,
                 chapter.get("chapter_lines"),
+            )
+
+            await write_ledger(
+                conn,
+                novel_id,
+                chapter_id,
+                chapter.get("chapter_refs"),
+                chapter.get("chapter_new"),
+                chapter.get("chapter_changed"),
+                chapter.get("chapter_resolved"),
+            )
+
+            # 大纲 ref 由代码从 card 生成，与模型报的 refs 分开管（write_ledger 不碰 outline）。
+            # None = 这一稿不动 outline ref（改稿路径），留着上一稿的。
+            await write_outline_refs(
+                conn,
+                novel_id,
+                chapter_id,
+                chapter.get("chapter_outline_refs"),
             )
 
             cur = await conn.execute(NOVEL_WORD_COUNT_SQL, (novel_id, novel_id))

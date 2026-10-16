@@ -4,7 +4,7 @@
 回炉目标按 intension 分，两条路的回炉机制各自是现成的：
   write → writer，_briefing 见 chapter_review 的 problems 或 edit_feedback 就走 _retry_note
   edit  → editor，_is_redo 见这两样就走 _redo_plan
-判断"要不要改"复用 utils.verdict 与 KEEP_PROMPT（它判的就是收下 / 要改 / 没表态）。
+判断"要不要改"复用 utils.verdict 与 KEEP_PROMPT（它判的就是收下 / 要改 / 不要了 / 没表态）。
 
 **只有点按钮、或明说要收下，才算确认**。用户没点按钮、而是问了一句（"这里为什么这么写"）
 时，那一句算没表态：先转给 chat 把话答了（chat 之后认得出这一稿还没落库，转回这里再问一次），
@@ -12,8 +12,9 @@
 静默落库（他没确认，库里的正文却已经换成了这一稿）。
 
 用户这一轮的要求跟库里对不上的那几处（reader 的 chapter_conflicts）也并进这一问一起定夺：
-他说保留就照他的写，那几处偏离记成影响台账（落库在 update）；说按库里改就回炉。前端把这两个
-出口做成按钮，答复是 {"option": "keep" / "revise"}，认得出就不必再过模型。
+他说保留就照他的写，那几处偏离记成影响台账（落库在 update）；说按库里改就回炉。前端把这三个
+出口做成按钮（收下 / 按库里改 / 这一稿不要了），答复是 {"option": "keep" / "revise" / "discard"}，
+认得出就不必再过模型。第三个出口是"反悔"：正文一个字都不落库，库里照旧。
 """
 import uuid
 
@@ -23,6 +24,7 @@ from langgraph.types import Command, interrupt
 
 from agents.utils.models import parse_json_value
 from ..state import ChapterConflict, State
+from ..utils.history import last_reply
 from ..utils.model import intentModel, _intentModel_backup
 from ..utils.prompt import KEEP_PROMPT
 from ..utils.verdict import verdict
@@ -45,9 +47,45 @@ def _choice(answer) -> str:
         value = parse_json_value(str(answer or ""))
     except ValueError:
         return ""
-    if isinstance(value, dict) and value.get("option") in ("keep", "revise"):
+    if isinstance(value, dict) and value.get("option") in ("keep", "revise", "discard"):
         return str(value["option"])
     return ""
+
+
+def _said_discard(text) -> bool:
+    """模型判词里"这一稿不要了"那个记号（见 KEEP_PROMPT 第 4 条）。打字答的那条路要靠它。"""
+    try:
+        value = parse_json_value(str(text or ""))
+    except ValueError:
+        return False
+    return isinstance(value, dict) and value.get("discard") is True
+
+
+def _discard(chapter: dict, order) -> Command:
+    """这一稿不要了：正文一个字都不落库，本轮照常收尾。
+
+    active_chapter 的正文清空 —— update 只认"正文非空、chapter_id 为空"才是本轮要落的稿，
+    清空它就什么都不写（跨轮留着的 active_chapter 与正常落完库同形：正文空、章号还在）。
+    审查结论 / 影响台账 / 设定改动一并清掉再交回去：reader 审出的问题行就摆在 change_impact
+    里，留着会被 update 当成本轮的要落库的写进去。回话由 update 说（它写完 messages 自己把
+    这个记号清掉）。
+    """
+    return Command(
+        goto="update",
+        update={
+            "active_chapter": {**chapter, "chapter_content": ""},
+            "chapter_review": {},
+            "edit_feedback": "",
+            "chapter_conflicts": [],
+            "change_impact": [],
+            "setting_changes": [],
+            "edit_note": (
+                f"第 {order} 章这一稿不要了，库里没动。想重写随时说一句。"
+                if order
+                else "这一稿不要了，库里没动。想重写随时说一句。"
+            ),
+        },
+    )
 
 
 def _redo_feedback(conflicts: list[ChapterConflict], problems: str) -> str:
@@ -118,16 +156,32 @@ async def confirm_chapter(state: State, config: RunnableConfig) -> Command:
     problems = (review.get("problems") or "").strip() or "审查这一关没过，但没写出具体问题。"
 
     conflicts = list(state.get("chapter_conflicts") or [])
+    grade = state.get("change_grade") or ""
+    # 用户这一轮要的是"改"就说"改好了"，说"写完了"像答错了（人工改稿与 agent 改稿都算改）。
+    verb = "改好了" if state.get("intension") == "edit" else "写完了"
+    # 这一问是"用户问了一句、由 chat 答完"之后重摆的（confirm_chapter → chat → 回到这里）。
+    # 重摆时点一句"回到这一稿"，否则同一整段连着出现两次，看着像新的一问。判据是 messages 末尾
+    # 那条助手回话：第一次摆时末尾是本轮那条用户消息（intension 写的），没有助手回话。
+    back = "回到这一稿 —— " if last_reply(state.get("messages")) else ""
 
     if passed:
-        # 审稿关掉的书没有"审查这一关"，别对它说一句不存在的过关。
-        head = (
-            f"第 {order} 章写完了（第 {attempt} 稿），审查这一关过了。"
-            if review_enabled
-            else f"第 {order} 章写完了（第 {attempt} 稿）。"
-        )
+        # 审稿关掉的书没有"审查这一关"；L1 被跳过审稿、L2 只跑了两路 —— 别对它们谎称一句
+        # 不存在的"过关"，走了哪一关就照实说哪一关。
+        if not review_enabled:
+            head = f"第 {order} 章{verb}（第 {attempt} 稿）。"
+        elif grade == "L1":
+            head = (
+                f"第 {order} 章{verb}（第 {attempt} 稿）。"
+                "这一稿是纯文字润色、没动事实，没走审稿。"
+            )
+        elif grade == "L2":
+            head = f"第 {order} 章{verb}（第 {attempt} 稿），连贯性与人物设定这两关过了。"
+        else:
+            head = f"第 {order} 章{verb}（第 {attempt} 稿），审查这一关过了。"
     else:
-        head = f"第 {order} 章写完了（第 {attempt} 稿），但审查这一关没过：\n\n{problems}"
+        head = f"第 {order} 章{verb}（第 {attempt} 稿），但审查这一关没过：\n\n{problems}"
+
+    head = f"{back}{head}"
 
     if conflicts:
         # 偏离跟"收不收下"并在一问里：答"保留"照样是收下，只是顺带把这几处记进受影响点。
@@ -153,16 +207,20 @@ async def confirm_chapter(state: State, config: RunnableConfig) -> Command:
             "直接收下入库有风险。"
         )
 
-    # 选项给前端做按钮。审查没过、或有偏离时才多一个"改"的出口 —— 其余情况收下是唯一去路。
+    # 选项给前端做按钮。审查没过、或有偏离时才多一个"改"的出口；"这一稿不要了"恒在 —— 它是
+    # 中途反悔的路：没有它，用户只能收下或回炉，两条都得把这一稿走完。
     options = [{"id": "keep", "label": "收下并保留" if conflicts else "收下并保存"}]
     if conflicts or not passed:
         options.append({"id": "revise", "label": "按库里改" if conflicts else "按审查意见改"})
+    options.append({"id": "discard", "label": "这一稿不要了"})
 
     answer = interrupt({"text": question, "options": options})
 
     # 按钮回传的选项认得出就照它定，不必再过模型；用户自己打字答的仍交给 KEEP_PROMPT 判
-    # （它判的就是收下 / 要改 / 没表态 —— 只有前两样动流程，没表态的不当确认）。
+    # （它判的就是收下 / 要改 / 不要了 / 没表态 —— 前三样动流程，没表态的不当确认）。
     choice = _choice(answer)
+    if choice == "discard":
+        return _discard(chapter, order)
     if choice:
         keep = choice == "keep"
         feedback = "" if keep else _redo_feedback(conflicts, problems if not passed else "")
@@ -191,6 +249,9 @@ async def confirm_chapter(state: State, config: RunnableConfig) -> Command:
                 return Command(goto="update", update=update)
         text = reply.content if isinstance(reply.content, str) else ""
         keep, feedback = verdict(text, "keep")
+        # 他打字说"这一稿不要了"（按钮那条在上面就走掉了，落不到这儿）：别当成没表态。
+        if not keep and _said_discard(text):
+            return _discard(chapter, order)
 
     if keep:
         # review 一并改成"通过"再走：后面落库只认这一稿成没成，旧问题不带进去。

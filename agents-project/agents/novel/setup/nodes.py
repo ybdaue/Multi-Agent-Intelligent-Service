@@ -506,14 +506,11 @@ async def maintain(state: SetupState, config: RunnableConfig) -> Command:
             },
         )
 
-    # LLM 给出的 next_question 可能指向已收集字段（LLM 不知道代码层清空的依赖项），
-    # 如果它有缺失项可问但指向了已收集的字段，纠正到第一个缺失项上。
-    if next_question and next_question not in missing:
-        next_question = missing[0]
-        next_hint = f"用户已确定了部分设定，现在该问 {SETTING_LABELS.get(next_question, next_question)}"
-
-    # 如果 maintain 没给出 next_question，选第一个缺失项
-    if not next_question and missing:
+    # 设定是一条先后链（见 SETTING_FIELDS / DEPENDENCIES）：排在前面的没定完，就不该跳到后面
+    # 去问。LLM 的 next_question 可能越过前面的项直奔后面（也可能指向已被代码连带清空重议的
+    # 项），一律锁定"当前最早缺失的那一项" —— 提问顺序 = 依赖链的顺序。LLM 指的正是它时，
+    # 保留它的 next_hint（那种多是"这一项还差某个子要素"的具体追问）。
+    if missing and next_question != missing[0]:
         next_question = missing[0]
         next_hint = f"用户已确定了部分设定，现在该问 {SETTING_LABELS.get(next_question, next_question)}"
 

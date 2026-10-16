@@ -33,11 +33,53 @@
   background: var(--color-surface);
 }
 
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
 .cardTitle {
+  flex: 1;
+  min-width: 0;
   font-size: 0.875rem;
   font-weight: 600;
   color: var(--color-text);
   word-break: break-word;
+}
+
+/* 「已变化 N 次」：与标题同行，右端不缩 */
+.changeTag {
+  flex-shrink: 0;
+  padding: 0 0.375rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  white-space: nowrap;
+}
+
+.trackRow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.trackBtn {
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 150ms;
+
+  &:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
 }
 
 .fields {

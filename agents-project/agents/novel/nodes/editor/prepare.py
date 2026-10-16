@@ -13,6 +13,16 @@ async def prepare(state: EditorState, config: RunnableConfig) -> dict:
     if not novel_id:
         return {"edit_note": "拿不到当前这本书的编号，改不了。"}
 
+    # 人工改稿：改后正文随请求带上来了，直接进 manual 节点比对旧台账、定严重程度，不必备
+    # catalog / 章节清单那两次料。
+    #
+    # 这里**不看 _is_redo**：manual_content 非空本身就说明"用户刚点了保存"，是确定的一轮；而
+    # "按审查意见改"那条回炉路进来时 manual_content 已被 manual 节点清空（见 editor/manual），
+    # 落不到这一条。从前多挂一个 not _is_redo，反倒让上一轮被打断（客户端断开 / 超时，update
+    # 没跑）残留下来的审查结论 / 回炉标记，把人工保存顶成了 agent 回炉改写。
+    if state.get("manual_content"):
+        return {"manual": True}
+
     novel = state.get("novel") or {}
     catalog = (await fetch_catalog(novel_id)).strip()
     chapters = (await list_chapters(novel_id)).strip()

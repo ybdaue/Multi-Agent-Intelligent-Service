@@ -40,6 +40,23 @@ def _named_order(said) -> Optional[int]:
 
 
 async def _intent_node(state: State, config: RunnableConfig):
+    # 人工改稿：用户在正文框里改完点了保存，改后正文随请求带上来了。意图是确定的（就是改这一章），
+    # 交给意图模型判是浪费、还可能判错 —— 直接短路：钉住他开着的那一章，走 edit 那条路，
+    # editor 见到 manual_content 就进 manual 节点（见 editor.prepare / editor.manual）。
+    manual = (state.get("manual_content") or "").strip()
+    if manual:
+        target = await _pin(config)
+        order = target.get("chapter_order")
+        # 跟前端那条本地气泡同一句话：刷新 / 切回这本书时由 /history 重建，用户看到的是同一句，
+        # 不会以为是两件事（本地气泡带得出章号，钉住了章就照它写）。
+        label = f"第 {order} 章" if order else "这一章"
+        return {
+            "intension": "edit",
+            "target_chapter": target,
+            "named_chapter_order": None,
+            "messages": [HumanMessage(content=f"手动修改{label}并保存")],
+        }
+
     user_message = state.get("user_message", "")
     history = recent_history(state.get("messages"), state.get("chat_summary") or "")
 

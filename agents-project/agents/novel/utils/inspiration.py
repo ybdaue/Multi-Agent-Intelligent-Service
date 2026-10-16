@@ -5,8 +5,8 @@
 
 使用策略 usage（must 必用 / selectable 选用 / never 不用）与生命周期 lifecycle（reuse 复用 /
 once 单次）都由用户在灵感库里定；新建时按分类给默认（风格默认必用，其余默认选用；引子型
-——剧情 / 人物 / 设定——默认单次，其余默认复用）。哪几章用过由 update 落章后补
-（`mark_used`）—— 单次灵感一旦用过就退出候选。
+——剧情 / 人物 / 设定——默认单次，其余默认复用）。哪几章用过由台账（novel_chapter_ref）记，
+单次灵感一旦用过就退出候选（`used_chapters` 从 ref 派生）。
 
 灵感不再从对话框上传：会话里挑中的是库里已有的行（`fetch_inspirations` 按 id 取回），
 随 `state.inspirations` 进图。`render_inspirations` 仍把它渲染进提示词。
@@ -49,21 +49,23 @@ CATEGORY_LABEL = {
 
 _INSERT_SQL = (
     'INSERT INTO novel_inspiration (id, "novelId", "sourceId", title, category, type, content, '
-    'usage, lifecycle, scenario, digest, "usedChapterIds", "createdAt", "updatedAt") '
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())"
+    'usage, lifecycle, scenario, digest, "createdAt", "updatedAt") '
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())"
 )
 
-# 追加而不是覆盖：同一条素材可能被好几章用到。
-_USED_SQL = (
-    'UPDATE novel_inspiration SET "usedChapterIds" = array_append("usedChapterIds", %s), '
-    '"updatedAt" = now() WHERE id = ANY(%s) AND NOT ("usedChapterIds" @> ARRAY[%s]::text[])'
+# 「这条灵感用在哪些章」改成从台账派生：章节 ↔ 灵感是 novel_chapter_ref 里的一行。
+# body 里 refType='inspiration' 的所有行，按 refId 归到各条灵感名下。
+_USED_CHAPTERS_SQL = (
+    'SELECT r."refId", r."chapterId" FROM novel_chapter_ref r '
+    'JOIN novel_chapter c ON c.id = r."chapterId" '
+    'WHERE c."novelId" = %s AND r."refType" = \'inspiration\'::"RefType"'
 )
 
-# 挑灵感 / 取灵感要出的列（键即库里的列名）。usedChapterIds 让 planner 看得见"用过没有"。
+# 挑灵感 / 取灵感要出的列（键即库里的列名）。usedChapterIds 已不再入库，由 ref 派生后补进返回体。
 # sourceId 让前端把同一份素材产出的多条灵感并进一张卡。
 _INSP_COLUMNS = (
     "id", "sourceId", "title", "category", "type", "content",
-    "usage", "lifecycle", "scenario", "digest", "usedChapterIds",
+    "usage", "lifecycle", "scenario", "digest",
 )
 
 # 翻译模型：小提示词 + JSON 出参，稳定优先，非流式。显式设超时，别让一条慢请求把整次新增卡死
@@ -229,7 +231,6 @@ async def add_inspirations(novel_id: str, items: list[dict]) -> list[dict]:
                         item.get("lifecycle") or default_lifecycle(cats),
                         item.get("scenario") or "",
                         item.get("digest") or "",
-                        [],
                     ),
                 )
                 written.append({**item, "id": item_id, "title": title, "category": cats})
@@ -242,7 +243,7 @@ async def reconcile_inspirations(
     """重新翻译一份素材：按标签重跑模型，重新派生这份素材产出的灵感。
 
     标签取 categories（用户在素材卡上选的）；没给就退回现有各行标签的并集。已有行按标签就地复用
-    （**保留 usage / lifecycle / usedChapterIds**，只重写 title / scenario / digest 与 category）；
+    （**保留 usage / lifecycle**，只重写 title / scenario / digest 与 category）；
     标签多出来的新行插入，标签去掉的行删除。原文与形态取自现有行，新行沿用同一 sourceId。
     返回这份素材重建后还剩的行 id（原 ids 都取不到就返回空，交给调用方报 404）。
     """
@@ -320,16 +321,30 @@ async def reconcile_inspirations(
                     (
                         new_id, novel_id, source_id, title or content[:40], [cat],
                         type_, content, default_usage([cat]), default_lifecycle([cat]),
-                        scenario, digest, [],
+                        scenario, digest,
                     ),
                 )
     return result_ids
 
 
-def _insp_row(row) -> dict:
-    """库内一行 → dict（键就是列名），usedChapterIds 换成布尔 used 供菜单展示。"""
+async def used_chapters(conn, novel_id: str) -> dict[str, list[str]]:
+    """这本书各条灵感用在了哪些章：{灵感 id: [章节 id, ...]}，从台账派生。
+
+    调用方拿它给灵感行补 usedChapterIds / used（保持返回给前端的字段名不变）。
+    """
+    cur = await conn.execute(_USED_CHAPTERS_SQL, (novel_id,))
+    out: dict[str, list[str]] = {}
+    for insp_id, chapter_id in await cur.fetchall():
+        out.setdefault(insp_id, []).append(chapter_id)
+    return out
+
+
+def _insp_row(row, used: dict[str, list[str]] | None = None) -> dict:
+    """库内一行 → dict（键就是列名）；usedChapterIds / used 由台账派生补进来（展示用）。"""
     data = dict(zip(_INSP_COLUMNS, row))
-    data["used"] = bool(data.get("usedChapterIds"))
+    ids = (used or {}).get(data.get("id") or "", [])
+    data["usedChapterIds"] = ids
+    data["used"] = bool(ids)
     return data
 
 
@@ -348,7 +363,8 @@ async def fetch_inspirations(novel_id: str, ids: list[str]) -> list[dict]:
             (novel_id, ids),
         )
         rows = await cur.fetchall()
-    return [_insp_row(row) for row in rows]
+        used = await used_chapters(conn, novel_id)
+    return [_insp_row(row, used) for row in rows]
 
 
 async def fetch_inspiration_menu(novel_id: str) -> dict:
@@ -370,7 +386,9 @@ async def fetch_inspiration_menu(novel_id: str) -> dict:
             'ORDER BY "createdAt"',
             (novel_id,),
         )
-        rows = [_insp_row(row) for row in await cur.fetchall()]
+        rows = await cur.fetchall()
+        used = await used_chapters(conn, novel_id)
+    rows = [_insp_row(row, used) for row in rows]
 
     forced: list[dict] = []
     optional: list[dict] = []
@@ -380,20 +398,6 @@ async def fetch_inspiration_menu(novel_id: str) -> dict:
         elif not (row.get("lifecycle") == "once" and row.get("used")):
             optional.append(row)
     return {"forced": forced, "optional": optional}
-
-
-async def mark_used(inspiration_ids: list[str], chapter_id: str) -> None:
-    """把这一章记进那几条素材的 usedChapterIds（这一轮没带灵感就什么都不做）。
-
-    不再按 novelId 收窄：id 是库里已有的行，本来就属于这本书。
-    """
-    if not inspiration_ids or not chapter_id:
-        return
-
-    from api.utils.db import pg_pool
-
-    async with pg_pool.connection() as conn:
-        await conn.execute(_USED_SQL, (chapter_id, list(inspiration_ids), chapter_id))
 
 
 def render_inspirations(items: list[dict]) -> str:

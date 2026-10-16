@@ -106,6 +106,18 @@ def _render_card(card: dict) -> str:
         ]
         if rows:
             lines.append("- 本章要用的已有设定（照这些保持一致）：\n" + "\n".join(rows))
+    foreshadow = card.get("foreshadowing")
+    if isinstance(foreshadow, list):
+        rows = [
+            f"  - {f.get('id')}：{(f.get('how') or '').strip()}"
+            for f in foreshadow
+            if isinstance(f, dict) and str(f.get("id") or "").strip()
+        ]
+        if rows:
+            lines.append(
+                "- 本章要收尾的伏笔（照它收；收完照旧在台账 refs 里报它，并把它报进台账的 resolved）：\n"
+                + "\n".join(rows)
+            )
     forbidden = (card.get("forbidden") or "").strip()
     if forbidden:
         lines.append(f"- 这一章不要写：{forbidden}")
@@ -258,6 +270,65 @@ def _constraint_block(context: dict, order: int) -> str:
     return "\n".join(lines)
 
 
+# 未收尾伏笔块给 planner 的篇幅上限：悬着的伏笔多了先摆先埋的几条，多的截掉。
+MAX_FORESHADOW_CHARS = 4_000
+
+
+def _foreshadowing_block(rows) -> str:
+    """未收尾的伏笔清单：代码从库里取好、拼成一段，**保证一定出现在 planner 输入里**
+    （比照 _constraint_block 的做法）。planner 照每条的「打算的收尾场景」判本章该不该收，
+    这些信息必须摆到它面前，不能指望它自己去查库。
+
+    一条都没有也要写明"没有"，好让 planner 确知"已经读过、确实没有"。
+    """
+    lines = ["【未收尾的伏笔】系统从库里取好的，一条都不许漏看："]
+    items = [r for r in (rows or []) if isinstance(r, dict) and r.get("id")]
+    if not items:
+        lines.append("- 没有未收尾的伏笔。")
+        return "\n".join(lines)
+    for row in items:
+        order = row.get("planted_order")
+        planted = f"埋在 第 {order} 章" if isinstance(order, int) else "埋设章节已删"
+        scenario = str(row.get("resolveScenario") or "").strip()
+        desc = " ".join(str(row.get("description") or "").split())
+        tail = f"；打算的收尾场景：{scenario}" if scenario else "；（埋的时候没写收尾场景）"
+        lines.append(f"- {row['id']} {desc}（{planted}{tail}）")
+    text = "\n".join(lines)
+    if len(text) > MAX_FORESHADOW_CHARS:
+        text = text[:MAX_FORESHADOW_CHARS] + "…（未收尾伏笔太多，只列到这里）"
+    return text
+
+
+# 人物关系块给 planner / 写手的篇幅上限：相关的人多了先摆先建的几条，多的截掉。
+MAX_RELATION_CHARS = 4_000
+
+
+def _relation_block(rows) -> str:
+    """本章相关人物当前的「人物关系」：代码从库里取好、拼成一段，**保证一定出现在
+    planner 输入与写手开场里**（比照 _foreshadowing_block）。写的时候照它保持关系一致
+    （谁跟谁是什么关系），不靠模型自己去查库、也不靠 planner 转述。
+
+    一条都没有也要写明「没有」，好让它确知「已经读过、确实没有」。
+    """
+    lines = ["【本章涉及的人物关系】库里记着的当前关系，写的时候照它保持一致（谁跟谁是什么关系）："]
+    items = [r for r in (rows or []) if isinstance(r, dict) and r.get("id")]
+    if not items:
+        lines.append("- 本章相关的人物，库里还没有记关系。")
+        return "\n".join(lines)
+    for row in items:
+        pair = f"{row.get('fromName') or '？'}→{row.get('toName') or '？'}"
+        kind = str(row.get("relationType") or "").strip()
+        strength = row.get("strength")
+        mark = f"（强度 {strength}）" if isinstance(strength, int) else ""
+        desc = str(row.get("description") or "").strip()
+        tail = f"：{desc}" if desc else ""
+        lines.append(f"- {row['id']} {pair} {kind}{mark}{tail}")
+    text = "\n".join(lines)
+    if len(text) > MAX_RELATION_CHARS:
+        text = text[:MAX_RELATION_CHARS] + "…（相关关系太多，只列到这里）"
+    return text
+
+
 def _lines_catalog(context: dict, order: int) -> str:
     """生效中的阶段线 / 支线目录：接着写照抄 id 报 continue，收尾报 close，换新报 open。
 
@@ -396,6 +467,21 @@ def _inspiration_menu_block(menu: dict) -> str:
     return "\n\n".join(blocks)
 
 
+def _optional_inspirations_block(menu: dict) -> str:
+    """给写手的「还能补选」清单：可选用的灵感（必用的已在【本章要用的灵感】里给过，不重复）。
+
+    写手若在正文里额外用上了这里的一条，就在台账 refs 里报它的 id —— 台账记「这一章用了哪几条」。
+    """
+    optional = [i for i in (menu.get("optional") or []) if isinstance(i, dict)]
+    if not optional:
+        return ""
+    return (
+        "【还能补选的灵感】库里可选用的还有这些；本章若还用到其中哪条，"
+        "在台账 refs 里报它的 id（用了才报，没用别报）：\n"
+        + "\n".join(_menu_item_line(i) for i in optional)
+    )
+
+
 def _chosen_inspirations(state: WriterState, card: dict, menu: dict) -> list[dict]:
     """本章最终要用的灵感（**代码合并**，不由模型拿捏）：本轮用户点名的 ∪ 必用 ∪ planner 从可选里挑的。
 
@@ -454,6 +540,10 @@ def _planner_input(state: WriterState) -> str:
     budget = bundle.get("budget") or ""
     if budget:
         lines.append(budget)
+    # 未收尾的伏笔由代码取好、无条件摆出来（空也说"没有"）：planner 必须读到它们才判得出本章该收哪些。
+    lines.append(_foreshadowing_block(bundle.get("foreshadowing")))
+    # 相关人物当前的关系也由代码取好、无条件摆出来 —— planner 照它挑本章要用的人 / 保持戏份一致。
+    lines.append(_relation_block(bundle.get("relations")))
     facts = (bundle.get("prev_facts") or "").strip()
     if facts:
         lines.append("上一章用到的那些设定，在库里的原始档案：\n\n" + facts)
@@ -488,6 +578,11 @@ def _briefing(state: WriterState, card: dict, chosen: list[dict] | None = None) 
             + render_chapter_inspirations(chosen)
         )
 
+    # 可选用的那份也摆出来，写手才补选得动（用了在台账 refs 里报 id）。
+    optionals = _optional_inspirations_block(bundle.get("inspirations") or {})
+    if optionals:
+        lines.append(optionals)
+
     lines.append("【本章任务卡】照它写，别跑偏：\n" + _render_card(card))
     budget = bundle.get("budget") or ""
     if budget:
@@ -499,6 +594,9 @@ def _briefing(state: WriterState, card: dict, chosen: list[dict] | None = None) 
     prev_content = (bundle.get("prev_content") or "").strip()
     if prev_content:
         lines.append(f"上一章（第 {order - 1} 章）全文，接着它写：\n\n{prev_content}")
+
+    # 本章相关人物当前的关系也照摆（planner 已照卡里的人物并集补查过）：写的时候照它保持一致。
+    lines.append(_relation_block(bundle.get("relations")))
 
     facts = (bundle.get("prev_facts") or "").strip()
     if facts:

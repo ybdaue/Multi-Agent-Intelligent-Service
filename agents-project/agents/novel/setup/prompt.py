@@ -48,8 +48,8 @@ DISCUSS_SYSTEM = """你是一个小说设定助手，正在跟用户聊天，帮
 
 - 小说套路（novel_tropes）：情绪标签（emotion）+ 题材（theme）+ 爽点模式（fun_point），三个都要定下来
 - 小说风格（novel_style）：叙事节奏（pace）+ 语言风格（language），两个都要定下来
-- 主角（novel_protagonists）：姓名（name）+ 性别（gender）+ 身份（identity）+ 性格（personality）+ 金手指/核心能力（power）+ 反差点（contrast）
 - 世界观（novel_world_rules）：世界观背景 + 等级/力量体系（如适用）+ 主要势力格局
+- 主角（novel_protagonists）：姓名（name）+ 性别（gender）+ 身份（identity）+ 性格（personality）+ 金手指/核心能力（power）+ 反差点（contrast）
 - 核心冲突（novel_outlines）：不含子要素，但要是一个完整的矛盾描述
 - 书名（novel_title）：不含子要素
 
@@ -68,7 +68,7 @@ DISCUSS_SYSTEM = """你是一个小说设定助手，正在跟用户聊天，帮
 
 	【严禁穿插书名】
 	- 只有当前正在定「书名」时才能推荐具体书名
-	- 讨论其他项（套路/风格/主角/核心冲突/世界观）时，绝对不要拿具体书名做例子
+	- 讨论其他项（套路/风格/世界观/主角/核心冲突）时，绝对不要拿具体书名做例子
 	- 用标签、描述词、概念来举例说明，不要出现《xxx》之类的书名推荐"""
 
 
@@ -122,8 +122,8 @@ MAINTAIN_SYSTEM = """你是一个小说设定提取助手。从对话历史（�
 - 各项包含的已知子要素：
   - novel_tropes：情绪标签（emotion）+ 题材（theme）+ 爽点模式（fun_point）
   - novel_style：叙事节奏（pace）+ 语言风格（language）
-  - novel_protagonists：姓名（name）+ 性别（gender）+ 身份（identity）+ 性格（personality）+ 金手指/核心能力（power）+ 反差点（contrast）
   - novel_world_rules：世界观背景 + 等级/力量体系 + 势力格局
+  - novel_protagonists：姓名（name）+ 性别（gender）+ 身份（identity）+ 性格（personality）+ 金手指/核心能力（power）+ 反差点（contrast）
   - novel_outlines / novel_title：不含子要素
 
 【结构化字段的输出格式 — 重要】
@@ -138,10 +138,16 @@ MAINTAIN_SYSTEM = """你是一个小说设定提取助手。从对话历史（�
   不要只输出本轮新增的那一个子要素，否则会丢掉之前已定的部分。用户明确改口的子要素以本轮为准。
 
 【依赖规则】
-- novel_tropes（小说套路）改了 → novel_protagonists（主角）和 novel_outlines（核心冲突）和 novel_world_rules（世界观）和 novel_title（书名）必须清空重议
-- novel_protagonists（主角）改了 → novel_outlines（核心冲突）和 novel_title（书名）必须清空重议
-- novel_world_rules（世界观）改了 → novel_outlines（核心冲突）和 novel_title（书名）必须清空重议
-- novel_outlines（核心冲突）改了 → novel_title（书名）必须清空重议
+六项是一条先后链：小说套路 → 小说风格 → 世界观 → 主角 → 核心冲突 → 书名。排在前面的是基调，
+后面的都照着它往下落。所以改动了某一项，它**后面全部**都要清空重议：
+- novel_tropes（小说套路）改了 → novel_style、novel_world_rules、novel_protagonists、novel_outlines、novel_title 全部清空重议
+- novel_style（小说风格）改了 → novel_world_rules、novel_protagonists、novel_outlines、novel_title 清空重议
+- novel_world_rules（世界观）改了 → novel_protagonists、novel_outlines、novel_title 清空重议
+- novel_protagonists（主角）改了 → novel_outlines、novel_title 清空重议
+- novel_outlines（核心冲突）改了 → novel_title 清空重议
+
+你只需判断"用户这一轮到底改了哪一项"，把它写进 clear_fields 或 settings_updates ——
+被牵连的那些项由程序按同一张依赖表自动清空，不用你列出来。
 
 【输出格式】
 只输出 JSON，不要多余文字（不要用 ```json 围栏）：

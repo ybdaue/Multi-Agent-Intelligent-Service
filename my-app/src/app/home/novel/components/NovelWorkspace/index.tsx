@@ -193,8 +193,6 @@ export default function NovelWorkspace() {
   const [chats, setChats] = useState<Record<string, Message[]>>({});
   /** 落库后催正文重取一次：改既有章时章 id 没变，下面那个 effect 不会自己重跑 */
   const [contentStamp, setContentStamp] = useState(0);
-  /** 这一章在别处被改过、本地这一笔没能保存；等用户自己决定什么时候换最新版 */
-  const [conflict, setConflict] = useState<{ novelId: string; chapterId: string } | null>(null);
   /** 正在跑的那一轮（流式正文 / 状态行 / 是否在等答复），null 表示这会儿没有在生成的 */
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   /** 已经向哪本书问过一次"历史 + 有没有待确认的稿"，免得每次重渲染都去打后端 */
@@ -213,19 +211,9 @@ export default function NovelWorkspace() {
       mountedRef.current = false;
     };
   }, []);
-  /** 已经为哪本书提过一次"上一轮中断了"，免得在几本书之间切来切去时反复说；重开一轮就销账 */
-  const toldInterruptedRef = useRef<Set<string>>(new Set());
-  /** 手改正文的防抖定时器：按键期间不发，停手 800ms 才落一次库 */
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** 攒着还没发出去的正文（键是 `novelId+chapterId`，切章不影响它认哪一章） */
-  const pendingSaveRef = useRef<{
-    novelId: string;
-    chapterId: string;
-    content: string;
-    /** 这一笔是拿哪一版改出来的，落库时当版本令牌发回去 */
-    version: string;
-  } | null>(null);
-  const { run, resume, stop, busy } = useNovelAgent();
+  /** 每一章"上次从库里取到的正文"，用来判当前正文有没有被改过（dirty）。键是 chapterId */
+  const loadedContentRef = useRef<Record<string, string>>({});
+  const { run, resume, manual, stop, busy } = useNovelAgent();
 
   const activeNovel = useMemo(
     () => novels.find((n) => n.id === activeNovelId) ?? null,
@@ -267,6 +255,35 @@ export default function NovelWorkspace() {
   const answerOptions = runHere && runTargetId === activeChapterId ? runHere.options : [];
   /** 章节栏要标"待确认"的那一章：本轮停在了它上面（可能就是库里还没这一行的稿） */
   const awaitingChapterId = runHere?.pendingQuestion ? runTargetId : null;
+
+  /** 本轮正落在这章上（生成中 / 待确认都算）：正在生成的章不给手改 */
+  const chapterRunning = runHere !== null && runTargetId === activeChapterId;
+
+  /** 正文有没有没保存的改动：当前这一份跟上次从库里取到的那一版不一致 */
+  const dirty =
+    !!activeChapter &&
+    activeChapter.content !==
+      (loadedContentRef.current[activeChapter.id] ?? activeChapter.content);
+
+  /**
+   * 这一章能不能手改：临时章（还没落库）、正在生成、已定稿都不行。
+   *
+   * 与后端 /manual 的章节状态闸、editor.manual 的后端闸同一个口径 —— 前端置灰只是第一道，
+   * 接口不能只靠前端自觉。空串 = 能改。
+   */
+  const editBlockReason = !activeChapter
+    ? ""
+    : activeChapter.temp
+      ? "这一章还没落库，先让 AI 写出来再改"
+      : chapterRunning
+        ? "AI 正在写这一章，等它写完再改"
+        : activeChapter.status === "done"
+          ? "已定稿的章节不能改，先把状态改成草稿或待修复"
+          : "";
+  const canEditActiveChapter = editBlockReason === "";
+
+  /** 保存按钮转圈：这一章正落着一轮（人工保存那趟没有草稿流，正文照旧显示、不换成草稿框） */
+  const saving = busy && chapterRunning && !pendingQuestion;
 
   /**
    * 不给再建新章：这本书已经有一个"新建了还没落库"的章，或者这一稿正等着用户确认。
@@ -323,65 +340,6 @@ export default function NovelWorkspace() {
     [applyNovels],
   );
 
-  /**
-   * 把攒着的那一笔正文落库（防抖到点、切章、卸载时都走它）。
-   *
-   * 回来的只有字数与新的版本令牌：两处字数直接就地写上、令牌换到这一章头上，**不重拉书架** ——
-   * 书架里每章的正文都是空的（正文按章单取），重拉会把用户正看着的这一章清空，而正文那个
-   * effect 的依赖没变（书 / 章 / 戳都没变），不会自己再取一次。
-   */
-  const flush_content_save = useCallback(() => {
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    const pending = pendingSaveRef.current;
-    if (!pending) return;
-    pendingSaveRef.current = null;
-
-    const form = new FormData();
-    form.append("novelId", pending.novelId);
-    form.append("chapterId", pending.chapterId);
-    form.append("content", pending.content);
-    form.append("version", pending.version);
-    mutateNovel<{ wordCount: number; novelWordCount: number; updatedAt: string }>(
-      "/api/novel/method/chapter/content",
-      { method: "POST", body: form },
-    )
-      .then((res) => {
-        setNovels((prev) =>
-          prev.map((n) =>
-            n.id !== pending.novelId
-              ? n
-              : {
-                  ...n,
-                  wordCount: res.novelWordCount,
-                  chapters: n.chapters.map((c) =>
-                    c.id === pending.chapterId
-                      ? { ...c, wordCount: res.wordCount, version: res.updatedAt }
-                      : c,
-                  ),
-                },
-          ),
-        );
-        // 这一笔落库顺带换了令牌：同一章还攒着下一笔的话，把它手上那份也换成新的，否则下一发假冲突
-        const next = pendingSaveRef.current;
-        if (next && next.novelId === pending.novelId && next.chapterId === pending.chapterId) {
-          pendingSaveRef.current = { ...next, version: res.updatedAt };
-        }
-      })
-      .catch((err: unknown) => {
-        // 版本对不上（412）：这一章在别处被改过。用户打的字留着，摆条冲突条等他自己决定 ——
-        // 自动重取会把他正打的内容冲掉，偷偷重试会静默覆盖别人。
-        if (err instanceof Error && (err as { status?: number }).status === 412) {
-          setConflict({ novelId: pending.novelId, chapterId: pending.chapterId });
-          return;
-        }
-        // "AI 正在写这一章"（409）等其余失败：原话摆到横幅上让用户自己拿主意
-        setLoadError(err instanceof Error ? err.message : "正文没能保存");
-      });
-  }, []);
-
   // 书架来自库里：进页面拉一次 /novels，侧栏与章节列表都照它渲染，
   // 各标签页要的 threadId 也是这里的 novels[].id。
   useEffect(() => {
@@ -409,6 +367,8 @@ export default function NovelWorkspace() {
     fetchNovelJSON<ChapterContentResponse>(url)
       .then((res) => {
         if (!alive) return;
+        // 记住库里这一版：它是 dirty 的基准（当前正文跟它不一致 = 有没保存的改动）
+        loadedContentRef.current[activeChapterId] = res.content;
         setNovels((prev) =>
           prev.map((n) =>
             n.id !== activeNovelId
@@ -437,12 +397,8 @@ export default function NovelWorkspace() {
     };
   }, [activeNovelId, activeChapterId, contentStamp]);
 
-  // 切书 / 切章 / 离开这一页时，把还在防抖窗口里、没发出去的那一笔正文先落库 ——
-  // 用户改完立刻翻走，改动不能跟着走掉。pendingSaveRef 自己记着是书 / 章，不靠当前的选中项。
-  useEffect(
-    () => () => flush_content_save(),
-    [activeNovelId, activeChapterId, flush_content_save],
-  );
+  // 切书 / 切章时正文会重新按章单取（见上面那个 effect）：没点保存就离开的改动随这次重取丢掉，
+  // 正是"不保存就不保留"该有的样子。本地改过的正文留在 novels 里，回到这一章时被库里那一版盖掉。
 
   // 选中的章也可能已经不在书里了（本地新建 / 删除的章从没落库，重拉一次就没了）：别死守着一个
   // 找不到的章让右侧空着，退回这一本的第一章。
@@ -743,10 +699,8 @@ export default function NovelWorkspace() {
         setActiveChapterId(next?.id ?? null);
       }
       if (chapter.temp) return;
-      // 还没发出去的那一笔正文就落在这章上：它是待删的了，别等防抖到点又发一遍
-      if (pendingSaveRef.current?.chapterId === chapter.id) pendingSaveRef.current = null;
-      // 冲突条也一并收掉：这一章都没了，它指着的那份"最新正文"再载入也没处放
-      if (conflict?.chapterId === chapter.id) setConflict(null);
+      // 本地记住的那一版正文也一并丢掉：这一章都没了，留着也没处用
+      delete loadedContentRef.current[chapter.id];
 
       mutateNovel<{ novelWordCount: number }>(
         `/api/novel/method/chapter?novelId=${encodeURIComponent(activeNovel.id)}` +
@@ -773,22 +727,20 @@ export default function NovelWorkspace() {
           );
         });
     },
-    [activeChapterId, activeNovel, conflict],
+    [activeChapterId, activeNovel],
   );
 
   /**
-   * 手改正文：本地立刻改（按键跟手），停手 800ms 后落一次库。
+   * 手改正文：**只改本地**，不发请求。
    *
-   * 防抖是必须的 —— 每敲一个字发一次会把后端打满。落库那几个字（本章 / 全书字数）由
-   * flush_content_save 回填。临时章（库里还没这一行）只改本地，等它落库了才谈得上存。
-   *
-   * 令牌只在"这一章的第一次按键"时取：之后 AI 落了库、用户还在同一段上接着打，发的仍是
-   * 开始打字时那一版，正好被版本闸挡下来 —— 这就是想要的结果，不该被刷新后的令牌蒙混过去。
+   * 正文不再按键防抖直写库了 —— 用户改完点标题栏那个「保存」才交给图里（走 /manual：重报台账、
+   * 定严重程度、审稿、入库确认）。不点保存就离开，切回这一章时下面那个按章取数的 effect 会用库里
+   * 那一版盖掉本地这份，改动随之丢弃。
    */
   const handleContentChange = useCallback(
     (content: string) => {
       if (!activeNovelId || !activeChapterId) return;
-      const chapter = activeNovel?.chapters.find((c) => c.id === activeChapterId);
+      if (!canEditActiveChapter) return;
       setNovels((prev) =>
         prev.map((n) =>
           n.id === activeNovelId
@@ -801,23 +753,8 @@ export default function NovelWorkspace() {
             : n,
         ),
       );
-      if (chapter?.temp) return;
-      // 这一章正卡在冲突上：本地照改（他打的字不能吞），但不再攒着发 —— 等他点"载入最新正文"
-      if (conflict?.novelId === activeNovelId && conflict.chapterId === activeChapterId) return;
-
-      const pending = pendingSaveRef.current;
-      const sameChapter =
-        pending?.novelId === activeNovelId && pending.chapterId === activeChapterId;
-      pendingSaveRef.current = {
-        novelId: activeNovelId,
-        chapterId: activeChapterId,
-        content,
-        version: sameChapter ? pending.version : chapter?.version ?? "",
-      };
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = setTimeout(() => flush_content_save(), 800);
     },
-    [activeChapterId, activeNovel, activeNovelId, conflict, flush_content_save],
+    [activeChapterId, activeNovelId, canEditActiveChapter],
   );
 
   /** 追加一条对话。键是 novelId —— 会话整本一条，翻去别的章照样看得见 */
@@ -921,15 +858,10 @@ export default function NovelWorkspace() {
 
       const res = await fetchNovelPending(novelId, activeChapterId ?? "");
       if (stale()) return;
-      if (!res.pending || !res.draft) {
-        // 上一轮中途断了（断网、点了停止）：后端记着这一笔，说一句让用户重发。
-        // 一本书只说一次 —— 在几本书之间切来切去不该反复念叨；重开一轮就把这条销掉。
-        if (res.lastRun?.status === "cancelled" && !toldInterruptedRef.current.has(novelId)) {
-          toldInterruptedRef.current.add(novelId);
-          pushMessage(novelId, "assistant", "上一轮中断了，重来。");
-        }
-        return;
-      }
+      // 没有待确认的稿就到此为止。上一轮要是中途断了（断网、点了停止、超时），后端已经把
+      // "请求中断了"那句写进对话历史了 —— 上面 /history 那份里就有，这里不再自己补一句，
+      // 否则同一条提示会摆两条。
+      if (!res.pending || !res.draft) return;
       const chapterId = ensure_draft_chapter(
         novelId,
         res.draft.order,
@@ -961,6 +893,165 @@ export default function NovelWorkspace() {
     pushMessage,
   ]);
 
+  /**
+   * 这一轮流跑起来要用的那套回调。开新章（handleSend）与人工保存（handleSaveChapter）共用一份
+   * —— 两边收到的事件（stage / target / token / question / final）处理一字不差，只有发起方式不同。
+   */
+  const buildHandlers = useCallback(
+    (threadId: string, chapterId: string): NovelAgentHandlers => ({
+      onStage: (text) =>
+        setActiveRun((prev) => (prev ? { ...prev, stage: text } : prev)),
+      // 后端定下这一轮要落哪一章：给在流的这一稿定归属，不再拿"发请求时开着的那一章"猜。
+      // 造章那一步（setNovels）放在 updater 外面 —— updater 里带副作用，StrictMode 下会跑两遍。
+      onTarget: (target) => {
+        // edit 的 target 直接指名道姓给了 chapterId，那一章本来就在架上，不必按章号去猜
+        // （用户改过标题的章按"第N章"认不出来）；write_next 才是要现造落脚点的那一路。
+        const landed = target.chapterId
+          ? target.chapterId
+          : ensure_draft_chapter(threadId, target.order, activeNovel?.chapters ?? []);
+        // TEMP 诊断：确认落点认成了哪一章。查完删。
+        console.log("[novel] onTarget", { target, landed, 发起时那一章: chapterId });
+        // 落点钉下来：架上已有（+ 新建的那一章、上一轮留下的临时框）就用它自己，没有才现造一个。
+        // 渲染认的是它 —— 见 runTargetId。
+        setActiveRun((prev) =>
+          prev ? { ...prev, target, targetChapterId: landed || prev.targetChapterId } : prev,
+        );
+        // 写新章时视图一定跟到落脚的那一章上：不然在流的正文没地方画（新章本来就该是当前这一章）。
+        // 已经在那一章上就不动（用户正看着它等正文）；改既有章也不动他。
+        if (target.kind === "write_next" && landed && landed !== chapterId) {
+          setActiveChapterId(landed);
+        }
+      },
+      // 回炉重写也会再来一次：临时框清空重来 —— 覆盖，不是追加
+      // 正文到头重来不切标签页：用户这会儿可能正在别的章、别的标签页上翻东西，
+      // 生成照跑，接不接着看由他自己决定。
+      onProseStart: () =>
+        setActiveRun((prev) =>
+          prev ? { ...prev, draft: { content: "", streaming: true } } : prev,
+        ),
+      onToken: (chunk) =>
+        setActiveRun((prev) =>
+          prev
+            ? {
+                ...prev,
+                draft: {
+                  content: (prev.draft?.content ?? "") + chunk,
+                  streaming: true,
+                },
+              }
+            : prev,
+        ),
+      onQuestion: (question) => {
+        // 这一问是"用户问了一句、由 chat 答完了"之后重摆的：先补上那句答复，再摆问题。
+        // 顺序不能反 —— 他看到的该是「我的问题 → 助手的答复 → 重摆的这一问」。
+        // 水合那一路 reply 是空串（答复已在 /history 里），这条分支自然跳过。
+        if (question.reply) pushMessage(threadId, "assistant", question.reply);
+        if (question.text) pushMessage(threadId, "assistant", question.text);
+        // 后端交的那一稿比流里拼起来的可信（被 /run 挡回来的那一次一个字都没流），
+        // 它挂在哪一章上由 ensure_draft_chapter 定：多半就是 onTarget 已经造好的那个框，
+        // 挡回来的那一轮则要另立一个。
+        const landed = question.draft
+          ? ensure_draft_chapter(
+              threadId,
+              question.draft.order,
+              activeNovel?.chapters ?? [],
+              question.draft.title,
+            )
+          : "";
+        setActiveRun((prev) =>
+          prev
+            ? {
+                ...prev,
+                chapterId: landed || prev.chapterId,
+                // 交稿这一问把落点最终钉死：onTarget 那一次认下的多半就是它，认出别的才换
+                targetChapterId: landed || prev.targetChapterId,
+                draft: question.draft
+                  ? { content: question.draft.content, streaming: false }
+                  : prev.draft
+                    ? { ...prev.draft, streaming: false }
+                    : null,
+                options: question.options,
+                stage: "",
+                pendingQuestion: true,
+              }
+            : prev,
+        );
+        // 只有"这一稿根本不是他手上那一章"时才把视图搬过去（被 /run 挡回来的那一次就是这样）；
+        // 正常写着的这一章，用户翻去别的章看别的，不该被拽回来。
+        if (landed && landed !== chapterId) setActiveChapterId(landed);
+      },
+      onFinal: (data) => {
+        if (data.message) pushMessage(threadId, "assistant", data.message);
+        setActiveRun(null);
+        // 这一轮可能补了人物 / 世界规则 / 大纲（都在 update 节点落库）：面板缓存作废，
+        // 此刻开着的那个标签页自己重拉一次。闲聊那一轮也会走到这儿，白作废一次而已。
+        if (activeNovelId) invalidateNovel(activeNovelId);
+
+        // 只有写新章那一轮才有"新东西"要接：chapterId 是刚落库那一章的真 id，把书架重拉一遍
+        // 让新章进列表、并切过去看它。（对话挂在小说名下，不用跟着章 id 搬。）
+        //
+        // 其余轮次的 chapterId 不能信：active_chapter 是跨轮留着的，闲聊、没改成的稿这一轮
+        // 什么都没落库（图走的是 intension → chat → compact → END，load 都没跑），它给出的还
+        // 是上一轮写的那一章。照着它切视图，人就被从正看着的章上甩走，本地新建、
+        // 还没落库的那一章也会被重拉的书架冲掉。
+        if (data.intension === "write" && !data.chapterId) {
+          // 写新章那一轮却没落下章：用户点了"这一稿不要了"。那个只在本地立着的临时章要重拉
+          // 书架才会消失 —— 留着挂个"临时"，还会把"+ 新建章"一直挡成灰的。
+          loadNovels({ novelId: activeNovelId }).catch(() => {});
+          return;
+        }
+        if (data.intension === "write" && data.chapterId && data.chapterId !== chapterId) {
+          loadNovels({ novelId: activeNovelId, chapterId: data.chapterId })
+            .then(() => setContentStamp((v) => v + 1))
+            .catch(() => {});
+          return;
+        }
+        // 改既有章时章 id 没变，正文（连同刚定成的 done）光靠 effect 不会刷新，靠这个戳重取一次。
+        setContentStamp((v) => v + 1);
+      },
+      onError: (message) => {
+        pushMessage(threadId, "assistant", `[错误] ${message}`);
+        setActiveRun(null);
+      },
+    }),
+    [activeNovel, activeNovelId, ensure_draft_chapter, loadNovels, pushMessage],
+  );
+
+  /**
+   * 人工改稿：标题栏那个「保存」按钮。把这一章**改后的正文**交给图里（走 /manual）。
+   *
+   * 不再按键防抖直写库了 —— 用户点了才保存，走的是"重报台账 → 定严重程度 → 按级审稿 → 入库
+   * 确认"这一整套；不点保存就离开，正文随按章重取丢掉。手里没改动、章节不可改、或本轮还在跑
+   * 时点了没反应（按钮本身就是灰的，这里再挡一道）。
+   */
+  const handleSaveChapter = useCallback(
+    (chapter: Chapter) => {
+      if (!activeNovelId || busy) return;
+      if (!dirty || !canEditActiveChapter) return;
+      const threadId = activeNovelId;
+      const order = chapterOrderOf(chapter);
+      // 本地气泡：这一轮是用户自己改完存下来的（人话留痕，不发后端 —— 后端见 manual_content 就懂）
+      pushMessage(
+        threadId,
+        "user",
+        `手动修改${order ? `第 ${order} 章` : `「${chapter.title}」`}并保存`,
+      );
+      // 这一轮就落在这一章上：人工那趟没有草稿流，正文照旧显示在正文框里（见 saving / draft）
+      setActiveRun({
+        novelId: threadId,
+        chapterId: chapter.id,
+        target: null,
+        targetChapterId: chapter.id,
+        draft: null,
+        stage: "",
+        pendingQuestion: false,
+        options: [],
+      });
+      manual(threadId, chapter.id, chapter.content, buildHandlers(threadId, chapter.id));
+    },
+    [activeNovelId, buildHandlers, busy, canEditActiveChapter, dirty, manual, pushMessage],
+  );
+
   const handleSend = useCallback(
     (
       chapterId: string,
@@ -972,8 +1063,6 @@ export default function NovelWorkspace() {
       if (!activeNovelId || busy) return;
       // 对话挂在这本书名下，chapterId 只决定这一轮写 / 改的是哪一章（请求里照旧带上）。
       const threadId = activeNovelId;
-      // 又开了一轮：上一条"上一轮中断了"的提示销账，真再断了还要能提一遍
-      toldInterruptedRef.current.delete(threadId);
       pushMessage(
         threadId,
         "user",
@@ -999,116 +1088,7 @@ export default function NovelWorkspace() {
             },
       );
 
-      const handlers: NovelAgentHandlers = {
-        onStage: (text) =>
-          setActiveRun((prev) => (prev ? { ...prev, stage: text } : prev)),
-        // 后端定下这一轮要落哪一章：给在流的这一稿定归属，不再拿"发请求时开着的那一章"猜。
-        // 造章那一步（setNovels）放在 updater 外面 —— updater 里带副作用，StrictMode 下会跑两遍。
-        onTarget: (target) => {
-          // edit 的 target 直接指名道姓给了 chapterId，那一章本来就在架上，不必按章号去猜
-          // （用户改过标题的章按"第N章"认不出来）；write_next 才是要现造落脚点的那一路。
-          const landed = target.chapterId
-            ? target.chapterId
-            : ensure_draft_chapter(threadId, target.order, activeNovel?.chapters ?? []);
-          // TEMP 诊断：确认落点认成了哪一章。查完删。
-          console.log("[novel] onTarget", { target, landed, 发起时那一章: chapterId });
-          // 落点钉下来：架上已有（+ 新建的那一章、上一轮留下的临时框）就用它自己，没有才现造一个。
-          // 渲染认的是它 —— 见 runTargetId。
-          setActiveRun((prev) =>
-            prev ? { ...prev, target, targetChapterId: landed || prev.targetChapterId } : prev,
-          );
-          // 写新章时视图一定跟到落脚的那一章上：不然在流的正文没地方画（新章本来就该是当前这一章）。
-          // 已经在那一章上就不动（用户正看着它等正文）；改既有章也不动他。
-          if (target.kind === "write_next" && landed && landed !== chapterId) {
-            setActiveChapterId(landed);
-          }
-        },
-        // 回炉重写也会再来一次：临时框清空重来 —— 覆盖，不是追加
-        // 正文到头重来不切标签页：用户这会儿可能正在别的章、别的标签页上翻东西，
-        // 生成照跑，接不接着看由他自己决定。
-        onProseStart: () =>
-          setActiveRun((prev) =>
-            prev ? { ...prev, draft: { content: "", streaming: true } } : prev,
-          ),
-        onToken: (chunk) =>
-          setActiveRun((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  draft: {
-                    content: (prev.draft?.content ?? "") + chunk,
-                    streaming: true,
-                  },
-                }
-              : prev,
-          ),
-        onQuestion: (question) => {
-          // 这一问是"用户问了一句、由 chat 答完了"之后重摆的：先补上那句答复，再摆问题。
-          // 顺序不能反 —— 他看到的该是「我的问题 → 助手的答复 → 重摆的这一问」。
-          // 水合那一路 reply 是空串（答复已在 /history 里），这条分支自然跳过。
-          if (question.reply) pushMessage(threadId, "assistant", question.reply);
-          if (question.text) pushMessage(threadId, "assistant", question.text);
-          // 后端交的那一稿比流里拼起来的可信（被 /run 挡回来的那一次一个字都没流），
-          // 它挂在哪一章上由 ensure_draft_chapter 定：多半就是 onTarget 已经造好的那个框，
-          // 挡回来的那一轮则要另立一个。
-          const landed = question.draft
-            ? ensure_draft_chapter(
-                threadId,
-                question.draft.order,
-                activeNovel?.chapters ?? [],
-                question.draft.title,
-              )
-            : "";
-          setActiveRun((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  chapterId: landed || prev.chapterId,
-                  // 交稿这一问把落点最终钉死：onTarget 那一次认下的多半就是它，认出别的才换
-                  targetChapterId: landed || prev.targetChapterId,
-                  draft: question.draft
-                    ? { content: question.draft.content, streaming: false }
-                    : prev.draft
-                      ? { ...prev.draft, streaming: false }
-                      : null,
-                  options: question.options,
-                  stage: "",
-                  pendingQuestion: true,
-                }
-              : prev,
-          );
-          // 只有"这一稿根本不是他手上那一章"时才把视图搬过去（被 /run 挡回来的那一次就是这样）；
-          // 正常写着的这一章，用户翻去别的章看别的，不该被拽回来。
-          if (landed && landed !== chapterId) setActiveChapterId(landed);
-        },
-        onFinal: (data) => {
-          if (data.message) pushMessage(threadId, "assistant", data.message);
-          setActiveRun(null);
-          // 这一轮可能补了人物 / 世界规则 / 大纲（都在 update 节点落库）：面板缓存作废，
-          // 此刻开着的那个标签页自己重拉一次。闲聊那一轮也会走到这儿，白作废一次而已。
-          if (activeNovelId) invalidateNovel(activeNovelId);
-
-          // 只有写新章那一轮才有"新东西"要接：chapterId 是刚落库那一章的真 id，把书架重拉一遍
-          // 让新章进列表、并切过去看它。（对话挂在小说名下，不用跟着章 id 搬。）
-          //
-          // 其余轮次的 chapterId 不能信：active_chapter 是跨轮留着的，闲聊、没改成的稿这一轮
-          // 什么都没落库（图走的是 intension → chat → update → END，load 都没跑），它给出的还
-          // 是上一轮写的那一章。照着它切视图，人就被从正看着的章上甩走，本地新建、
-          // 还没落库的那一章也会被重拉的书架冲掉。
-          if (data.intension === "write" && data.chapterId && data.chapterId !== chapterId) {
-            loadNovels({ novelId: activeNovelId, chapterId: data.chapterId })
-              .then(() => setContentStamp((v) => v + 1))
-              .catch(() => {});
-            return;
-          }
-          // 改既有章时章 id 没变，正文（连同刚定成的 done）光靠 effect 不会刷新，靠这个戳重取一次。
-          setContentStamp((v) => v + 1);
-        },
-        onError: (message) => {
-          pushMessage(threadId, "assistant", `[错误] ${message}`);
-          setActiveRun(null);
-        },
-      };
+      const handlers = buildHandlers(threadId, chapterId);
 
       // 上一轮停下来的那个问题还等着答复：这一句就是答它
       // 附件跟着这一轮一起送（文件本体 + 元信息），后端落 novel_inspiration 并拼进写作用的提示词。
@@ -1117,11 +1097,9 @@ export default function NovelWorkspace() {
       else run(activeNovelId, text, chapterId, handlers, attachments);
     },
     [
-      activeNovel,
       activeNovelId,
+      buildHandlers,
       busy,
-      ensure_draft_chapter,
-      loadNovels,
       pendingQuestion,
       pushMessage,
       resume,
@@ -1130,7 +1108,7 @@ export default function NovelWorkspace() {
   );
 
   /**
-   * 点了确认环节的出口按钮（收下 / 按库里改）：照它答，用户不必自己把"收下"打出来。
+   * 点了确认环节的出口按钮（收下 / 按库里改 / 这一稿不要了）：照它答，用户不必自己把"收下"打出来。
    *
    * 走的还是 handleSend 那条路 —— 对话里留一句人话，发给后端的却是可认的选项（后端认得出就
    * 不再过模型判）。
@@ -1173,33 +1151,12 @@ export default function NovelWorkspace() {
     setActiveRun(null);
   }, [activeNovelId, activeRun, pushMessage, stop]);
 
-  /**
-   * 冲突条上那个"载入最新正文"：丢掉自己手上这一份，取库里那一版（连版本令牌一起换新）。
-   *
-   * 这一步必须由用户按 —— 自动重取会把他正在打的字冲掉，偷偷重试会静默覆盖别人。
-   */
-  const handle_reload_conflict = useCallback(() => {
-    if (!conflict) return;
-    setConflict(null);
-    // 冲突可能不是当前这一章（他改完又翻去别处了）：先把视图搬回去，再催正文重取
-    setActiveChapterId(conflict.chapterId);
-    setContentStamp((v) => v + 1);
-  }, [conflict]);
-
   // 会话是整本书一条：切章时右侧不动，只有切书才换一份
   const messages = activeNovelId ? chats[activeNovelId] ?? [] : [];
 
   return (
     <div className={styles.shell}>
       {loadError && <div className={styles.notice}>{loadError}</div>}
-      {conflict?.novelId === activeNovelId ? (
-        <div className={styles.conflict}>
-          <span>这一章在别处被改过，你这次的改动没有保存。</span>
-          <button type="button" className={styles.conflictAction} onClick={handle_reload_conflict}>
-            载入最新正文
-          </button>
-        </div>
-      ) : null}
       <NovelSidebar
         novels={novels}
         activeNovelId={activeNovelId}
@@ -1237,6 +1194,13 @@ export default function NovelWorkspace() {
         onContentChange={handleContentChange}
         onChangeStatus={(status) => {
           if (activeChapter) handleChapterStatusChange(activeChapter, status);
+        }}
+        dirty={dirty}
+        canEdit={canEditActiveChapter}
+        editBlockReason={editBlockReason}
+        saving={saving}
+        onSave={() => {
+          if (activeChapter) handleSaveChapter(activeChapter);
         }}
         messages={messages}
         onSend={(text, attachments) => {

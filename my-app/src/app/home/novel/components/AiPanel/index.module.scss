@@ -32,6 +32,39 @@
   color: var(--color-text-secondary);
 }
 
+/* 原生开关：静默有条、开是主色，圆点滑过去 */
+.reviewSwitch {
+  position: relative;
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1rem;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--color-border);
+  cursor: pointer;
+  transition: background 150ms;
+}
+
+.reviewSwitchOn {
+  background: var(--color-primary);
+}
+
+.reviewKnob {
+  position: absolute;
+  top: 0.125rem;
+  left: 0.125rem;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 150ms;
+}
+
+.reviewSwitchOn .reviewKnob {
+  transform: translateX(0.75rem);
+}
+
 .toolBtn {
   display: flex;
   align-items: center;
